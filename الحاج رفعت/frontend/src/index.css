@@ -1,0 +1,25 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    direction: rtl;
+    background-color: #f3f4f6;
+    color: #1f2937;
+    font-family: 'Tajawal', 'Cairo', sans-serif;
+  }
+}
+
+/* إلغاء أسهم زيادة ونقصان الأرقام نهائياً في جميع المتصفحات */
+input::-webkit-outer-spin-button,
+input::-webkit-inner-spin-button {
+  -webkit-appearance: none !important;
+  display: none !important;
+  margin: 0 !important;
+}
+
+input[type="number"] {
+  -moz-appearance: textfield !important;
+  appearance: textfield !important;
+}
