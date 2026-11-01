@@ -28,21 +28,42 @@ exports.getDashboardSummary = (req, res) => {
             netCashMovement: netCashMovement
         };
 
-        // 2. Treasury (calculated from all historical data)
-        const totalCollections = db.prepare(`SELECT COALESCE(SUM(amount), 0) as total FROM customer_payments`).get().total;
-        const totalSupplierPayments = db.prepare(`SELECT COALESCE(SUM(ABS(amount)), 0) as total FROM supplier_balance_transactions WHERE transaction_type = 'deposit'`).get().total;
-        const totalExp1 = db.prepare(`SELECT COALESCE(SUM(amount), 0) as total FROM expenses WHERE status != 'CANCELLED'`).get().total;
-        const totalExp2 = db.prepare(`SELECT COALESCE(SUM(amount), 0) as total FROM other_expenses WHERE status != 'CANCELLED'`).get().total;
-        const totalWith = db.prepare(`SELECT COALESCE(SUM(amount), 0) as total FROM worker_withdrawals WHERE status != 'CANCELLED'`).get().total;
+        // 2. Treasury (calculated accurately from real financial accounts)
+        const accounts = db.prepare('SELECT id, name, type, balance FROM financial_accounts').all();
 
-        const overallCash = totalCollections - (totalSupplierPayments + totalExp1 + totalExp2 + totalWith);
+        let cashBalance = 0;
+        let bankMisrBalance = 0;
+        let nbeBalance = 0;
+        let walletsBalance = 0;
+        let totalBalance = 0;
+
+        accounts.forEach(acc => {
+            const bal = Number(acc.balance) || 0;
+            totalBalance += bal;
+            const name = (acc.name || '').trim();
+            if (name.includes('نقدي') || acc.type === 'CASH' || acc.id === 1) {
+                cashBalance += bal;
+            } else if (name.includes('مصر')) {
+                bankMisrBalance += bal;
+            } else if (name.includes('أهلي') || name.includes('اهلي')) {
+                nbeBalance += bal;
+            } else if (acc.type === 'EWALLET' || acc.type === 'WALLET' || name.includes('محافظ') || name.includes('محفظة')) {
+                walletsBalance += bal;
+            }
+        });
 
         const treasury = {
-            cash: overallCash,
-            bankMisr: 0,
-            nbe: 0,
-            wallets: 0,
-            total: overallCash
+            cash: cashBalance,
+            bankMisr: bankMisrBalance,
+            nbe: nbeBalance,
+            wallets: walletsBalance,
+            total: totalBalance,
+            accounts: accounts.map(a => ({
+                id: a.id,
+                name: a.name,
+                type: a.type,
+                balance: Number(a.balance) || 0
+            }))
         };
 
         // 3. Alerts

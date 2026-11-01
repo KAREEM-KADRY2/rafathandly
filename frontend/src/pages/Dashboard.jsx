@@ -145,28 +145,31 @@ export default function Dashboard() {
 
           {/* 2. الخزنة */}
           <section className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-x-auto">
-            <div className="px-6 py-4 border-b border-gray-100 bg-gray-50 flex items-center gap-2">
-              <Wallet className="text-emerald-600" size={20} />
-              <h2 className="text-lg font-bold text-gray-800">الخزنة والأرصدة</h2>
+            <div className="px-6 py-4 border-b border-gray-100 bg-gray-50 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Wallet className="text-emerald-600" size={20} />
+                <h2 className="text-lg font-bold text-gray-800">الخزنة والأرصدة</h2>
+              </div>
+              <Link to="/treasury" className="text-xs font-bold text-blue-600 hover:text-blue-800 transition-colors">
+                إدارة الخزنة والحسابات ←
+              </Link>
             </div>
             <div className="p-6">
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-                <div className="text-center p-4 border rounded-lg hover:shadow-md transition-shadow">
-                  <p className="text-sm text-gray-500 mb-1">الكاش (الصندوق)</p>
-                  <p className="text-lg font-bold text-gray-800" dir="ltr">{formatCurrency(treasury.cash)}</p>
-                </div>
-                <div className="text-center p-4 border rounded-lg hover:shadow-md transition-shadow">
-                  <p className="text-sm text-gray-500 mb-1">بنك مصر</p>
-                  <p className="text-lg font-bold text-gray-800" dir="ltr">{formatCurrency(treasury.bankMisr)}</p>
-                </div>
-                <div className="text-center p-4 border rounded-lg hover:shadow-md transition-shadow">
-                  <p className="text-sm text-gray-500 mb-1">البنك الأهلي</p>
-                  <p className="text-lg font-bold text-gray-800" dir="ltr">{formatCurrency(treasury.nbe)}</p>
-                </div>
-                <div className="text-center p-4 border rounded-lg hover:shadow-md transition-shadow">
-                  <p className="text-sm text-gray-500 mb-1">المحافظ الإلكترونية</p>
-                  <p className="text-lg font-bold text-gray-800" dir="ltr">{formatCurrency(treasury.wallets)}</p>
-                </div>
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 mb-6">
+                {(Array.isArray(treasury.accounts) && treasury.accounts.length > 0 ? treasury.accounts : [
+                  { id: 1, name: 'الكاش (الصندوق)', balance: treasury.cash },
+                  { id: 2, name: 'CIB', balance: 0 },
+                  { id: 3, name: 'البنك الأهلي', balance: treasury.nbe },
+                  { id: 4, name: 'بنك مصر', balance: treasury.bankMisr },
+                  { id: 5, name: 'المحافظ الإلكترونية', balance: treasury.wallets },
+                ]).map(acc => (
+                  <div key={acc.id || acc.name} className="text-center p-3 border rounded-lg hover:shadow-md transition-shadow bg-gray-50/50">
+                    <p className="text-xs font-semibold text-gray-500 mb-1 truncate">{acc.name}</p>
+                    <p className={`text-base font-bold ${Number(acc.balance || 0) < 0 ? 'text-red-600' : 'text-gray-800'}`} dir="ltr">
+                      {formatCurrency(acc.balance)}
+                    </p>
+                  </div>
+                ))}
               </div>
               <div className="bg-slate-800 text-white p-4 rounded-lg flex justify-between items-center">
                 <span className="font-bold">إجمالي الرصيد المتاح:</span>

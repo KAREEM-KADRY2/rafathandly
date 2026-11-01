@@ -16,26 +16,74 @@ function recalculateCustomerBalances(customerId) {
 
 function reallocateCustomerSales(customerId) {
     if (!customerId) return;
-    const sales = db.prepare(`SELECT id, original_amount, COALESCE(zara_amount, 0) as zara_amount FROM credit_sales WHERE customer_id = ? AND status != 'CANCELLED' ORDER BY date(sale_date) ASC, id ASC`).all(customerId);
+    
+    // 1. Reset all non-cancelled sales to base amounts (original - zara)
+    const sales = db.prepare(`
+        SELECT id, original_amount, COALESCE(zara_amount, 0) as zara_amount 
+        FROM credit_sales 
+        WHERE customer_id = ? AND status != 'CANCELLED' 
+        ORDER BY datetime(sale_date) ASC, id ASC
+    `).all(customerId);
+
     const updateSaleStmt = db.prepare(`UPDATE credit_sales SET remaining_amount = ?, paid_amount = ?, status = ? WHERE id = ?`);
     for (const sale of sales) {
         const netOriginal = Math.max(0, sale.original_amount - sale.zara_amount);
         updateSaleStmt.run(netOriginal, 0, netOriginal === 0 ? 'PAID' : 'CONFIRMED', sale.id);
     }
 
-    const payments = db.prepare(`SELECT id, amount FROM customer_payments WHERE customer_id = ? AND amount > 0 ORDER BY datetime(payment_date) ASC, id ASC`).all(customerId);
+    // 2. Fetch all customer payments with positive amount
+    const payments = db.prepare(`
+        SELECT id, credit_sale_id, amount 
+        FROM customer_payments 
+        WHERE customer_id = ? AND amount > 0 
+        ORDER BY datetime(payment_date) ASC, id ASC
+    `).all(customerId);
 
+    // 3. First pass: Apply payments with explicit credit_sale_id directly to their specified sales
+    let unallocatedPayments = [];
     for (const p of payments) {
-        let unallocated = p.amount;
-        const openSales = db.prepare(`SELECT id, remaining_amount, paid_amount FROM credit_sales WHERE customer_id = ? AND status != 'CANCELLED' AND remaining_amount > 0 ORDER BY date(sale_date) ASC, id ASC`).all(customerId);
+        if (p.credit_sale_id) {
+            const targetSale = db.prepare(`SELECT id, remaining_amount, paid_amount FROM credit_sales WHERE id = ? AND customer_id = ? AND status != 'CANCELLED'`).get(p.credit_sale_id, customerId);
+            if (targetSale && targetSale.remaining_amount > 0) {
+                const toPay = Math.min(p.amount, targetSale.remaining_amount);
+                const newRemaining = targetSale.remaining_amount - toPay;
+                const newPaid = targetSale.paid_amount + toPay;
+                const newStatus = newRemaining === 0 ? 'PAID' : 'PARTIALLY_PAID';
+                updateSaleStmt.run(newRemaining, newPaid, newStatus, targetSale.id);
+
+                const leftover = p.amount - toPay;
+                if (leftover > 0) unallocatedPayments.push({ id: p.id, amount: leftover });
+            } else {
+                unallocatedPayments.push({ id: p.id, amount: p.amount });
+            }
+        } else {
+            unallocatedPayments.push({ id: p.id, amount: p.amount });
+        }
+    }
+
+    // 4. Second pass: Apply general / unallocated payments across remaining open sales (latest first)
+    const linkPaymentStmt = db.prepare(`UPDATE customer_payments SET credit_sale_id = ? WHERE id = ? AND credit_sale_id IS NULL`);
+    for (let u of unallocatedPayments) {
+        let remainingToAllocate = u.amount;
+        if (remainingToAllocate <= 0) continue;
+        const openSales = db.prepare(`
+            SELECT id, remaining_amount, paid_amount 
+            FROM credit_sales 
+            WHERE customer_id = ? AND status != 'CANCELLED' AND remaining_amount > 0 
+            ORDER BY datetime(sale_date) DESC, id DESC
+        `).all(customerId);
+
         for (const sale of openSales) {
-            if (unallocated <= 0) break;
-            const toPay = Math.min(unallocated, sale.remaining_amount);
+            if (remainingToAllocate <= 0) break;
+            const toPay = Math.min(remainingToAllocate, sale.remaining_amount);
             const newRemaining = sale.remaining_amount - toPay;
             const newPaid = sale.paid_amount + toPay;
             const newStatus = newRemaining === 0 ? 'PAID' : 'PARTIALLY_PAID';
             updateSaleStmt.run(newRemaining, newPaid, newStatus, sale.id);
-            unallocated -= toPay;
+            if (u.id) {
+                linkPaymentStmt.run(sale.id, u.id);
+            }
+            remainingToAllocate -= toPay;
         }
     }
     
@@ -44,28 +92,77 @@ function reallocateCustomerSales(customerId) {
 
 function reallocateSupplierPurchases(supplierId) {
     if (!supplierId) return;
-    const purchases = db.prepare(`SELECT id, total_amount FROM purchases WHERE supplier_id = ? AND status != 'CANCELLED' ORDER BY date(purchase_date) ASC, id ASC`).all(supplierId);
+    const purchases = db.prepare(`
+        SELECT id, total_amount 
+        FROM purchases 
+        WHERE supplier_id = ? AND status != 'CANCELLED' 
+        ORDER BY datetime(purchase_date) ASC, id ASC
+    `).all(supplierId);
+
     const updatePurchStmt = db.prepare(`UPDATE purchases SET remaining_amount = ?, paid_amount = ?, status = ? WHERE id = ?`);
     for (const p of purchases) {
         updatePurchStmt.run(p.total_amount, 0, p.total_amount === 0 ? 'PAID' : 'CONFIRMED', p.id);
     }
 
-    const deposits = db.prepare(`SELECT id, ABS(amount) as amt FROM supplier_balance_transactions WHERE supplier_id = ? AND transaction_type = 'deposit' AND amount < 0 ORDER BY datetime(created_at) ASC, id ASC`).all(supplierId);
+    const deposits = db.prepare(`
+        SELECT id, ABS(amount) as amt, reference_number 
+        FROM supplier_balance_transactions 
+        WHERE supplier_id = ? AND transaction_type = 'deposit' AND amount < 0 
+        ORDER BY datetime(created_at) ASC, id ASC
+    `).all(supplierId);
 
+    // 1. Explicit pass: Deposits referencing a specific purchase_id
+    let unallocatedDeposits = [];
     for (const d of deposits) {
-        let unallocated = d.amt;
-        const openPurchases = db.prepare(`SELECT id, remaining_amount, paid_amount FROM purchases WHERE supplier_id = ? AND status != 'CANCELLED' AND remaining_amount > 0 ORDER BY date(purchase_date) ASC, id ASC`).all(supplierId);
+        const refPurchId = parseInt(d.reference_number, 10);
+        if (refPurchId && !isNaN(refPurchId)) {
+            const targetPurch = db.prepare(`SELECT id, remaining_amount, paid_amount FROM purchases WHERE id = ? AND supplier_id = ? AND status != 'CANCELLED'`).get(refPurchId, supplierId);
+            if (targetPurch && targetPurch.remaining_amount > 0) {
+                const toPay = Math.min(d.amt, targetPurch.remaining_amount);
+                const newRemaining = targetPurch.remaining_amount - toPay;
+                const newPaid = targetPurch.paid_amount + toPay;
+                const newStatus = newRemaining === 0 ? 'PAID' : 'PARTIALLY_PAID';
+                updatePurchStmt.run(newRemaining, newPaid, newStatus, targetPurch.id);
+
+                const leftover = d.amt - toPay;
+                if (leftover > 0) unallocatedDeposits.push({ id: d.id, amt: leftover });
+            } else {
+                unallocatedDeposits.push({ id: d.id, amt: d.amt });
+            }
+        } else {
+            unallocatedDeposits.push({ id: d.id, amt: d.amt });
+        }
+    }
+
+    // 2. General pass: Apply unallocated deposits across remaining open purchases (latest first)
+    const linkPurchStmt = db.prepare(`UPDATE supplier_balance_transactions SET reference_number = ? WHERE id = ? AND (reference_number IS NULL OR reference_number = '')`);
+    for (let u of unallocatedDeposits) {
+        let remainingToAllocate = u.amt;
+        if (remainingToAllocate <= 0) continue;
+        const openPurchases = db.prepare(`
+            SELECT id, remaining_amount, paid_amount 
+            FROM purchases 
+            WHERE supplier_id = ? AND status != 'CANCELLED' AND remaining_amount > 0 
+            ORDER BY datetime(purchase_date) DESC, id DESC
+        `).all(supplierId);
+
         for (const p of openPurchases) {
-            if (unallocated <= 0) break;
-            const toPay = Math.min(unallocated, p.remaining_amount);
+            if (remainingToAllocate <= 0) break;
+            const toPay = Math.min(remainingToAllocate, p.remaining_amount);
             const newRemaining = p.remaining_amount - toPay;
             const newPaid = p.paid_amount + toPay;
             const newStatus = newRemaining === 0 ? 'PAID' : 'PARTIALLY_PAID';
             updatePurchStmt.run(newRemaining, newPaid, newStatus, p.id);
-            unallocated -= toPay;
+            if (u.id) {
+                linkPurchStmt.run(String(p.id), u.id);
+            }
+            remainingToAllocate -= toPay;
         }
     }
 }
+
+exports.reallocateCustomerSales = reallocateCustomerSales;
+exports.reallocateSupplierPurchases = reallocateSupplierPurchases;
 
 function reverseVoucherEffects(tx) {
     if (!tx) return;
@@ -566,8 +663,9 @@ exports.getAccountStatement = (req, res) => {
 
 
 exports.createVoucher = (req, res) => {
-    const { type, party_type, party_id, party_name, amount, payment_method, account_id, transaction_date, description } = req.body;
+    const { type, party_type, party_id, party_name, amount, payment_method, account_id, transaction_date, description, invoice_id, target_invoice_id } = req.body;
     const numAmount = Number(amount);
+    const linkedInvoiceId = invoice_id ? parseInt(invoice_id, 10) : (target_invoice_id ? parseInt(target_invoice_id, 10) : null);
     
     if (numAmount <= 0) return res.status(400).json({ error: 'المبلغ يجب أن يكون أكبر من الصفر' });
     
@@ -604,22 +702,29 @@ exports.createVoucher = (req, res) => {
             // 1. Customer Voucher
             if (party_type === 'customer' && parsedPartyId) {
                 const paymentAmount = txType === 'IN' ? numAmount : -numAmount;
-                const txDesc = description || (txType === 'IN' ? 'سند قبض' : 'سند صرف (رد نقدية للعميل)');
+                let txDesc = description || (txType === 'IN' ? 'سند قبض' : 'سند صرف (رد نقدية للعميل)');
+                if (linkedInvoiceId) {
+                    const inv = db.prepare('SELECT invoice_number FROM credit_sales WHERE id = ?').get(linkedInvoiceId);
+                    const invNum = inv?.invoice_number || linkedInvoiceId;
+                    if (!txDesc.includes(String(invNum))) {
+                        txDesc += ` (فاتورة رقم ${invNum})`;
+                    }
+                }
                 
                 const paymentRes = db.prepare(`
-                    INSERT INTO customer_payments (customer_id, amount, payment_method, payment_date, notes) 
-                    VALUES (?, ?, ?, ?, ?)
+                    INSERT INTO customer_payments (customer_id, credit_sale_id, amount, payment_method, payment_date, notes, account_id) 
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                 `).run(
-                    parsedPartyId, paymentAmount, payment_method || 'نقدي', txDate, txDesc
+                    parsedPartyId, linkedInvoiceId, paymentAmount, payment_method || 'نقدي', txDate, txDesc, targetAccId
                 );
                 refId = paymentRes.lastInsertRowid;
                 refType = 'customer_payment';
 
                 const catAmount = txType === 'IN' ? -numAmount : numAmount;
                 db.prepare(`
-                    INSERT INTO customer_account_transactions (customer_id, payment_id, transaction_type, amount, balance_after, transaction_date, notes)
-                    VALUES (?, ?, 'PAYMENT', ?, 0, ?, ?)
-                `).run(parsedPartyId, refId, catAmount, txDate, txDesc);
+                    INSERT INTO customer_account_transactions (customer_id, credit_sale_id, payment_id, transaction_type, amount, balance_after, transaction_date, notes)
+                    VALUES (?, ?, ?, 'PAYMENT', ?, 0, ?, ?)
+                `).run(parsedPartyId, linkedInvoiceId, refId, catAmount, txDate, txDesc);
 
                 reallocateCustomerSales(parsedPartyId);
                 
@@ -630,7 +735,14 @@ exports.createVoucher = (req, res) => {
                     const isFactory = supplier.type === 'مصنع';
                     let balanceChange = 0;
                     let sbtAmount = 0;
-                    const txDesc = description || (txType === 'IN' ? 'سند قبض' : 'سند صرف');
+                    let txDesc = description || (txType === 'IN' ? 'سند قبض' : 'سند صرف');
+                    if (linkedInvoiceId) {
+                        const pinv = db.prepare('SELECT invoice_number FROM purchases WHERE id = ?').get(linkedInvoiceId);
+                        const pinvNum = pinv?.invoice_number || linkedInvoiceId;
+                        if (!txDesc.includes(String(pinvNum))) {
+                            txDesc += ` (فاتورة شراء رقم ${pinvNum})`;
+                        }
+                    }
                     
                     if (isFactory) {
                         // Factory: OUT increases prepaid balance (+), IN decreases prepaid balance (-)
@@ -647,12 +759,12 @@ exports.createVoucher = (req, res) => {
                     const activePeriodId = periodsController.getActivePeriodId();
                     const sbtRes = db.prepare(`
                         INSERT INTO supplier_balance_transactions (supplier_id, amount, transaction_type, reference_number, description, account_id, created_at, period_id)
-                        VALUES (?, ?, 'deposit', '', ?, ?, ?, ?)
-                    `).run(parsedPartyId, sbtAmount, txDesc, targetAccId, txDate, activePeriodId);
+                        VALUES (?, ?, 'deposit', ?, ?, ?, ?, ?)
+                    `).run(parsedPartyId, sbtAmount, linkedInvoiceId ? String(linkedInvoiceId) : '', txDesc, targetAccId, txDate, activePeriodId);
                     refId = sbtRes.lastInsertRowid;
                     refType = 'supplier_transaction';
 
-                    if (!isFactory) reallocateSupplierPurchases(parsedPartyId);
+                    reallocateSupplierPurchases(parsedPartyId);
                 }
 
             // 3. Worker Voucher
@@ -706,8 +818,9 @@ exports.createVoucher = (req, res) => {
 
 exports.updateVoucher = (req, res) => {
     const { id } = req.params;
-    const { type, party_type, party_id, party_name, amount, payment_method, account_id, transaction_date, description } = req.body;
+    const { type, party_type, party_id, party_name, amount, payment_method, account_id, transaction_date, description, invoice_id, target_invoice_id } = req.body;
     const numAmount = Number(amount);
+    const linkedInvoiceId = invoice_id ? parseInt(invoice_id, 10) : (target_invoice_id ? parseInt(target_invoice_id, 10) : null);
     if (!numAmount || numAmount <= 0) return res.status(400).json({ error: 'المبلغ يجب أن يكون أكبر من الصفر' });
 
     const txType = (type === 'receipt' || type === 'IN') ? 'IN' : 'OUT';
@@ -730,19 +843,27 @@ exports.updateVoucher = (req, res) => {
 
             if (party_type === 'customer' && parsedPartyId) {
                 const paymentAmount = txType === 'IN' ? numAmount : -numAmount;
-                const txDesc = description || (txType === 'IN' ? 'سند قبض' : 'سند صرف (رد نقدية للعميل)');
+                let txDesc = description || (txType === 'IN' ? 'سند قبض' : 'سند صرف (رد نقدية للعميل)');
+                if (linkedInvoiceId) {
+                    const inv = db.prepare('SELECT invoice_number FROM credit_sales WHERE id = ?').get(linkedInvoiceId);
+                    const invNum = inv?.invoice_number || linkedInvoiceId;
+                    if (!txDesc.includes(String(invNum))) {
+                        txDesc += ` (فاتورة رقم ${invNum})`;
+                    }
+                }
+
                 const paymentRes = db.prepare(`
-                    INSERT INTO customer_payments (customer_id, amount, payment_method, payment_date, notes)
-                    VALUES (?, ?, ?, ?, ?)
-                `).run(parsedPartyId, paymentAmount, payment_method || 'نقدي', txDate, txDesc);
+                    INSERT INTO customer_payments (customer_id, credit_sale_id, amount, payment_method, payment_date, notes, account_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                `).run(parsedPartyId, linkedInvoiceId, paymentAmount, payment_method || 'نقدي', txDate, txDesc, targetAccountId);
                 newRefId = paymentRes.lastInsertRowid;
                 newRefType = 'customer_payment';
 
                 const catAmount = txType === 'IN' ? -numAmount : numAmount;
                 db.prepare(`
-                    INSERT INTO customer_account_transactions (customer_id, payment_id, transaction_type, amount, balance_after, transaction_date, notes)
-                    VALUES (?, ?, 'PAYMENT', ?, 0, ?, ?)
-                `).run(parsedPartyId, newRefId, catAmount, txDate, txDesc);
+                    INSERT INTO customer_account_transactions (customer_id, credit_sale_id, payment_id, transaction_type, amount, balance_after, transaction_date, notes)
+                    VALUES (?, ?, ?, 'PAYMENT', ?, 0, ?, ?)
+                `).run(parsedPartyId, linkedInvoiceId, newRefId, catAmount, txDate, txDesc);
 
                 reallocateCustomerSales(parsedPartyId);
             } else if ((party_type === 'supplier' || party_type === 'factory') && parsedPartyId) {
@@ -751,7 +872,15 @@ exports.updateVoucher = (req, res) => {
                     const isFactory = supplier.type === 'مصنع';
                     let balanceChange = 0;
                     let sbtAmount = 0;
-                    const txDesc = description || (txType === 'IN' ? 'سند قبض' : 'سند صرف');
+                    let txDesc = description || (txType === 'IN' ? 'سند قبض' : 'سند صرف');
+                    if (linkedInvoiceId) {
+                        const pinv = db.prepare('SELECT invoice_number FROM purchases WHERE id = ?').get(linkedInvoiceId);
+                        const pinvNum = pinv?.invoice_number || linkedInvoiceId;
+                        if (!txDesc.includes(String(pinvNum))) {
+                            txDesc += ` (فاتورة شراء رقم ${pinvNum})`;
+                        }
+                    }
+
                     if (isFactory) {
                         balanceChange = txType === 'OUT' ? numAmount : -numAmount;
                         sbtAmount = txType === 'OUT' ? numAmount : -numAmount;
@@ -764,12 +893,12 @@ exports.updateVoucher = (req, res) => {
                     const activePeriodId = periodsController.getActivePeriodId();
                     const sbtRes = db.prepare(`
                         INSERT INTO supplier_balance_transactions (supplier_id, amount, transaction_type, reference_number, description, account_id, created_at, period_id)
-                        VALUES (?, ?, 'deposit', '', ?, ?, ?, ?)
-                    `).run(parsedPartyId, sbtAmount, txDesc, targetAccountId, txDate, activePeriodId);
+                        VALUES (?, ?, 'deposit', ?, ?, ?, ?, ?)
+                    `).run(parsedPartyId, sbtAmount, linkedInvoiceId ? String(linkedInvoiceId) : '', txDesc, targetAccountId, txDate, activePeriodId);
                     newRefId = sbtRes.lastInsertRowid;
                     newRefType = 'supplier_transaction';
 
-                    if (!isFactory) reallocateSupplierPurchases(parsedPartyId);
+                    reallocateSupplierPurchases(parsedPartyId);
                 }
             } else if (party_type === 'worker' && parsedPartyId) {
                 const w_amount = txType === 'OUT' ? numAmount : -numAmount;

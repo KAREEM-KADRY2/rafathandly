@@ -227,18 +227,14 @@ exports.getCreditSaleById = (req, res) => {
         sale.net_profit = sale.original_amount - total_cost;
 
         
-        const paymentsStmt = db.prepare('SELECT * FROM customer_payments WHERE credit_sale_id = ? ORDER BY payment_date DESC');
+        const paymentsStmt = db.prepare(`
+            SELECT cp.*, fa.name as account_name
+            FROM customer_payments cp
+            LEFT JOIN financial_accounts fa ON cp.account_id = fa.id
+            WHERE cp.credit_sale_id = ?
+            ORDER BY cp.payment_date DESC, cp.id DESC
+        `);
         const payments = paymentsStmt.all(id);
-        
-
-        
-        // Get the current overall customer balance (all unpaid amounts)
-        const currentBalStmt = db.prepare(`SELECT COALESCE((SELECT CASE WHEN balance_type = 'debit' THEN amount ELSE -amount END FROM opening_balances WHERE entity_type = 'customer' AND entity_id = ?), 0) + COALESCE((SELECT SUM(remaining_amount) FROM credit_sales WHERE customer_id = ? AND status != 'CANCELLED'), 0) as total_due`);
-        const current_customer_balance = currentBalStmt.get(sale.customer_id, sale.customer_id).total_due;
-
-        // Previous balance is logically: Overall current balance - this invoice's remaining amount.
-        // This ensures it perfectly reflects the exact historical debt outside of this invoice's unpaid portion.
-        const previous_customer_balance = current_customer_balance - sale.remaining_amount;
 
         // Get customer's opening balance if registered
         const obRow = db.prepare("SELECT balance_type, amount, effective_date, notes FROM opening_balances WHERE entity_type = 'customer' AND entity_id = ?").get(sale.customer_id);
@@ -248,6 +244,42 @@ exports.getCreditSaleById = (req, res) => {
             effective_date: obRow.effective_date,
             notes: obRow.notes
         } : null;
+        const obAmount = opening_balance ? (opening_balance.balance_type === 'debit' ? opening_balance.amount : -opening_balance.amount) : 0;
+
+        // Accurate historical previous balance prior to this sale:
+        const prevSalesRow = db.prepare(`
+            SELECT COALESCE(SUM(original_amount - COALESCE(zara_amount, 0)), 0) as val
+            FROM credit_sales
+            WHERE customer_id = ? AND status != 'CANCELLED' 
+              AND (datetime(sale_date) < datetime(?) OR (datetime(sale_date) = datetime(?) AND id < ?))
+        `).get(sale.customer_id, sale.sale_date, sale.sale_date, sale.id);
+
+        const prevPaymentsRow = db.prepare(`
+            SELECT COALESCE(SUM(amount), 0) as val
+            FROM customer_payments
+            WHERE customer_id = ? AND (datetime(payment_date) < datetime(?) OR (datetime(payment_date) = datetime(?) AND credit_sale_id IS NOT NULL AND credit_sale_id < ?))
+        `).get(sale.customer_id, sale.sale_date, sale.sale_date, sale.id);
+
+        const prevAdjustmentsRow = db.prepare(`
+            SELECT COALESCE(SUM(amount), 0) as val
+            FROM customer_adjustments
+            WHERE customer_id = ? AND datetime(created_at) < datetime(?)
+        `).get(sale.customer_id, sale.sale_date);
+
+        const calculatedPrevBalance = obAmount + (prevSalesRow?.val || 0) - (prevPaymentsRow?.val || 0) - (prevAdjustmentsRow?.val || 0);
+
+        // Current overall customer balance across all operations
+        const currentBalStmt = db.prepare(`
+            SELECT 
+                COALESCE((SELECT CASE WHEN balance_type = 'debit' THEN amount ELSE -amount END FROM opening_balances WHERE entity_type = 'customer' AND entity_id = ?), 0) +
+                COALESCE((SELECT SUM(original_amount - COALESCE(zara_amount, 0)) FROM credit_sales WHERE customer_id = ? AND status != 'CANCELLED'), 0) -
+                COALESCE((SELECT SUM(amount) FROM customer_payments WHERE customer_id = ?), 0) -
+                COALESCE((SELECT SUM(amount) FROM customer_adjustments WHERE customer_id = ?), 0)
+            AS total_due
+        `);
+        const current_customer_balance = currentBalStmt.get(sale.customer_id, sale.customer_id, sale.customer_id, sale.customer_id).total_due;
+
+        const previous_customer_balance = calculatedPrevBalance;
         
         res.json({ ...sale, items, payments, previous_customer_balance, current_customer_balance, opening_balance });
     } catch (error) {
@@ -518,7 +550,10 @@ exports.createCreditSale = (req, res) => {
 
     try {
         const saleId = transaction();
-        auditLogger.logAction(req.body.recorded_by || '???? ??????', 'إنشاء فاتورة مبيعات', 'المبيعات', 'فاتورة مبيعات', saleId, `فاتورة مبيعات للعميل بقيمة ${req.body.items.reduce((acc, item) => acc + (parseFloat(item.quantity || 0) * parseFloat(item.unit_price || 0)), 0)}`);
+        try {
+            treasuryController.reallocateCustomerSales(customer_id);
+        } catch (e) {}
+        auditLogger.logAction(req.body.recorded_by || 'مستخدم النظام', 'إنشاء فاتورة مبيعات', 'المبيعات', 'فاتورة مبيعات', saleId, `فاتورة مبيعات للعميل بقيمة ${req.body.items.reduce((acc, item) => acc + (parseFloat(item.quantity || 0) * parseFloat(item.unit_price || 0)), 0)}`);
         res.status(201).json({ id: saleId, message: 'تم إنشاء فاتورة المبيعات بنجاح' });
     } catch (error) {
         res.status(400).json({ error: error.message });

@@ -225,14 +225,7 @@ export default function WhatsappInvoiceModal({ customerId, customerName, onClose
               <div className="bg-[#f8f9fc] rounded-xl p-3.5 flex justify-between items-center mb-4 border border-gray-100">
                 <div className="text-right px-3">
                   <p className="text-gray-400 font-bold text-xs mb-0.5">اسم العميل:</p>
-                  <p className="text-xl font-black text-[#1a2b4c]">{customer.name}</p>
-                  {sale.opening_balance && Number(sale.opening_balance.amount) > 0 && (
-                    <div className="mt-1 flex items-center gap-2 text-[11px] font-bold text-indigo-700 bg-indigo-50 px-2.5 py-0.5 rounded border border-indigo-100 inline-flex">
-                      <span>الرصيد الافتتاحي:</span>
-                      <span dir="ltr">{Number(sale.opening_balance.amount).toLocaleString()} ج.م</span>
-                      <span>({sale.opening_balance.balance_type === 'debit' ? 'مدين / عليه' : 'دائن / له'})</span>
-                    </div>
-                  )}
+                  <p className="text-xl font-black text-[#1a2b4c] leading-normal">{customer.name}</p>
                 </div>
                 <div className="bg-[#3b82f6] text-white p-2.5 rounded-xl shadow-sm">
                   <User size={24} />

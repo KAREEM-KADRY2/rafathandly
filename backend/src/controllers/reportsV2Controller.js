@@ -1,5 +1,16 @@
 const db = require('../db');
 
+function normalizeArabic(str) {
+    if (!str) return '';
+    let s = String(str).trim()
+        .replace(/[أإآ]/g, 'ا')
+        .replace(/ة/g, 'ه')
+        .replace(/ى/g, 'ي');
+    if (s === 'شيكاره' || s === 'شيكارة' || s === 'شكاره' || s === 'شكارة') return 'شكاره';
+    if (s === 'كجم' || s === 'كيلوجرام' || s === 'كيلو جرام') return 'كيلو';
+    return s;
+}
+
 function getDateFilter(startDate, endDate, colName) {
     let filter = "";
     const params = [];
@@ -8,17 +19,99 @@ function getDateFilter(startDate, endDate, colName) {
     return { filter, params };
 }
 
+function buildCostResolver() {
+    const invItems = db.prepare('SELECT name, unit, secondary_unit, conversion_factor, conversion_operator FROM inventory_items').all();
+    
+    // Purchases costs from active non-cancelled purchases
+    const purchRows = db.prepare(`
+        SELECT pi.item_name, pi.total_price, COALESCE(NULLIF(pi.base_quantity, 0), pi.quantity, 0) as qty, pi.unit_price, p.purchase_date
+        FROM purchase_items pi
+        JOIN purchases p ON pi.purchase_id = p.id
+        WHERE UPPER(p.status) != 'CANCELLED'
+        ORDER BY p.purchase_date DESC, pi.id DESC
+    `).all();
+
+    const costSums = new Map();
+    const latestUnitPrices = new Map();
+
+    for (const pr of purchRows) {
+        const rawName = (pr.item_name || '').trim();
+        const normName = normalizeArabic(rawName);
+
+        for (const k of [rawName, normName]) {
+            if (!costSums.has(k)) costSums.set(k, { total_cost: 0, total_qty: 0 });
+            const entry = costSums.get(k);
+            entry.total_cost += Number(pr.total_price) || 0;
+            entry.total_qty += Number(pr.qty) || 0;
+
+            if (!latestUnitPrices.has(k) && Number(pr.unit_price) > 0) {
+                latestUnitPrices.set(k, Number(pr.unit_price));
+            }
+        }
+    }
+
+    const getInvItem = (itemName) => {
+        const raw = (itemName || '').trim();
+        const norm = normalizeArabic(raw);
+        return invItems.find(i => (i.name || '').trim() === raw || normalizeArabic(i.name) === norm) || null;
+    };
+
+    const getAverageCost = (itemName) => {
+        const raw = (itemName || '').trim();
+        const norm = normalizeArabic(raw);
+        if (costSums.has(raw) && costSums.get(raw).total_qty > 0) {
+            const e = costSums.get(raw);
+            return e.total_cost / e.total_qty;
+        }
+        if (costSums.has(norm) && costSums.get(norm).total_qty > 0) {
+            const e = costSums.get(norm);
+            return e.total_cost / e.total_qty;
+        }
+        if (latestUnitPrices.has(raw)) return latestUnitPrices.get(raw);
+        if (latestUnitPrices.has(norm)) return latestUnitPrices.get(norm);
+        return 0;
+    };
+
+    const calculateItemCost = (item, allocations = []) => {
+        if (item.item_type === 'service') {
+            const srv = db.prepare('SELECT cost_price FROM services WHERE id = ?').get(item.service_id);
+            return (Number(srv?.cost_price) || 0) * (Number(item.quantity) || 0);
+        }
+
+        // 1. Direct allocation match
+        if (allocations && allocations.length > 0) {
+            let allocatedCost = 0;
+            for (const alloc of allocations) {
+                allocatedCost += (Number(alloc.base_quantity || alloc.quantity) * Number(alloc.unit_price));
+            }
+            if (allocatedCost > 0) return allocatedCost;
+        }
+
+        // 2. Unit conversion + weighted average cost
+        const invItem = getInvItem(item.item_name);
+        let qtyInBase = Number(item.quantity) || 0;
+        if (invItem && invItem.unit && invItem.secondary_unit && invItem.conversion_factor) {
+            const normUnit = normalizeArabic(item.unit);
+            const normSec = normalizeArabic(invItem.secondary_unit);
+            if (normUnit === normSec || item.unit === invItem.secondary_unit) {
+                qtyInBase = (invItem.conversion_operator === '*') ? (qtyInBase * invItem.conversion_factor) : (qtyInBase / invItem.conversion_factor);
+            }
+        }
+
+        const unitCost = getAverageCost(item.item_name);
+        return qtyInBase * unitCost;
+    };
+
+    return { getInvItem, getAverageCost, calculateItemCost };
+}
+
 // 1. Sales Report
 exports.getSales = (req, res) => {
     try {
         const { startDate, endDate, export: exportParam, all } = req.query;
         const { filter, params } = getDateFilter(startDate, endDate, 's.sale_date');
 
-        const invItems = db.prepare('SELECT name, unit, secondary_unit, conversion_factor, conversion_operator FROM inventory_items').all();
-        const invMap = new Map(invItems.map(i => [i.name, i]));
-
-        const costs = db.prepare('SELECT item_name, SUM(total_price) as total_cost, SUM(base_quantity) as total_qty FROM purchase_items GROUP BY item_name').all();
-        const costMap = new Map(costs.map(c => [c.item_name, c.total_qty > 0 ? c.total_cost / c.total_qty : 0]));
+        const costResolver = buildCostResolver();
 
         const summaryRow = db.prepare(`
             SELECT 
@@ -56,43 +149,56 @@ exports.getSales = (req, res) => {
             sales = db.prepare(query).all(...params, limit, offset);
         }
 
-        let totalCost = 0;
-        let totalProfit = 0;
+        // Calculate costs across all filtered sales for accurate global summary totals
+        const allFilteredSales = db.prepare(`
+            SELECT s.id, s.original_amount, COALESCE(s.zara_amount, 0) as zara_amount
+            FROM credit_sales s
+            WHERE s.status != 'CANCELLED' ${filter}
+        `).all(...params);
 
-        if (sales.length > 0) {
-            const saleIds = sales.map(s => s.id);
-            const placeholders = saleIds.map(() => '?').join(',');
-            const allItems = db.prepare(`SELECT * FROM credit_sale_items WHERE credit_sale_id IN (${placeholders})`).all(...saleIds);
+        let totalCostAll = 0;
+        let totalProfitAll = 0;
 
-            const itemsBySale = {};
-            for (const item of allItems) {
-                if (!itemsBySale[item.credit_sale_id]) itemsBySale[item.credit_sale_id] = [];
-                itemsBySale[item.credit_sale_id].push(item);
+        if (allFilteredSales.length > 0) {
+            const allItemsFiltered = db.prepare(`
+                SELECT csi.* 
+                FROM credit_sale_items csi
+                JOIN credit_sales s ON csi.credit_sale_id = s.id
+                WHERE s.status != 'CANCELLED' ${filter.replace(/s\./g, 's.')}
+            `).all(...params);
+
+            let allocMap = new Map();
+            try {
+                const allAllocations = db.prepare(`
+                    SELECT a.sale_item_id, a.base_quantity, a.quantity, pi.unit_price
+                    FROM sale_item_purchase_allocations a
+                    JOIN purchase_items pi ON a.purchase_item_id = pi.id
+                `).all();
+                for (const al of allAllocations) {
+                    if (!allocMap.has(al.sale_item_id)) allocMap.set(al.sale_item_id, []);
+                    allocMap.get(al.sale_item_id).push(al);
+                }
+            } catch (e) {}
+
+            const costBySale = {};
+            for (const item of allItemsFiltered) {
+                const itemAllocs = allocMap.get(item.id) || [];
+                const itCost = costResolver.calculateItemCost(item, itemAllocs);
+                costBySale[item.credit_sale_id] = (costBySale[item.credit_sale_id] || 0) + itCost;
+            }
+
+            for (const s of allFilteredSales) {
+                const c = costBySale[s.id] || 0;
+                const net = Number(s.original_amount) - Number(s.zara_amount || 0);
+                totalCostAll += c;
+                totalProfitAll += (net - c);
             }
 
             for (const s of sales) {
-                const items = itemsBySale[s.id] || [];
-                let invoiceCost = 0;
-                for (const item of items) {
-                    const invItem = invMap.get(item.item_name);
-                    let qtyInBase = item.quantity;
-                    if (invItem && invItem.unit !== item.unit && invItem.secondary_unit === item.unit) {
-                        if (invItem.conversion_operator === '*') {
-                            qtyInBase = item.quantity * (invItem.conversion_factor || 1);
-                        } else {
-                            qtyInBase = item.quantity / (invItem.conversion_factor || 1);
-                        }
-                    }
-                    const unitCost = costMap.get(item.item_name) || 0;
-                    invoiceCost += (qtyInBase * unitCost);
-                }
-
-                const profit = s.original_amount - invoiceCost;
-                s.cost = invoiceCost;
-                s.profit = profit;
-
-                totalCost += invoiceCost;
-                totalProfit += profit;
+                const c = costBySale[s.id] || 0;
+                const net = Number(s.original_amount) - Number(s.zara_amount || 0);
+                s.cost = c;
+                s.profit = net - c;
             }
         }
 
@@ -100,8 +206,8 @@ exports.getSales = (req, res) => {
             total_sales: summaryRow?.total_sales || 0,
             total_paid: summaryRow?.total_paid || 0,
             total_remaining: summaryRow?.total_remaining || 0,
-            total_cost: totalCost,
-            total_profit: totalProfit,
+            total_cost: totalCostAll,
+            total_profit: totalProfitAll,
             count: total
         };
 
@@ -189,39 +295,41 @@ exports.getProfitLoss = (req, res) => {
     try {
         const { startDate, endDate } = req.query;
         
-        const salesFilter = getDateFilter(startDate, endDate, 'sale_date');
-        const totalSalesRow = db.prepare(`SELECT COALESCE(SUM(original_amount), 0) as val FROM credit_sales WHERE status != 'CANCELLED' ${salesFilter.filter}`).get(...salesFilter.params);
+        const salesFilter = getDateFilter(startDate, endDate, 's.sale_date');
+        const totalSalesRow = db.prepare(`SELECT COALESCE(SUM(s.original_amount), 0) as val, COALESCE(SUM(s.zara_amount), 0) as zara FROM credit_sales s WHERE s.status != 'CANCELLED' ${salesFilter.filter}`).get(...salesFilter.params);
         const totalSales = totalSalesRow.val;
+        const totalZara = totalSalesRow.zara || 0;
 
-        const invItems = db.prepare('SELECT name, unit, secondary_unit, conversion_factor, conversion_operator FROM inventory_items').all();
-        const invMap = new Map(invItems.map(i => [i.name, i]));
-
-        const costs = db.prepare('SELECT item_name, SUM(total_price) as total_cost, SUM(base_quantity) as total_qty FROM purchase_items GROUP BY item_name').all();
-        const costMap = new Map(costs.map(c => [c.item_name, c.total_qty > 0 ? c.total_cost / c.total_qty : 0]));
+        const costResolver = buildCostResolver();
 
         const cogsItems = db.prepare(`
-            SELECT csi.item_name, csi.quantity, csi.unit
+            SELECT csi.*
             FROM credit_sale_items csi
             JOIN credit_sales s ON csi.credit_sale_id = s.id
             WHERE s.status != 'CANCELLED' ${salesFilter.filter}
         `).all(...salesFilter.params);
 
+        let allocMap = new Map();
+        try {
+            const allAllocations = db.prepare(`
+                SELECT a.sale_item_id, a.base_quantity, a.quantity, pi.unit_price
+                FROM sale_item_purchase_allocations a
+                JOIN purchase_items pi ON a.purchase_item_id = pi.id
+            `).all();
+            for (const al of allAllocations) {
+                if (!allocMap.has(al.sale_item_id)) allocMap.set(al.sale_item_id, []);
+                allocMap.get(al.sale_item_id).push(al);
+            }
+        } catch (e) {}
+
         let totalCogs = 0;
         for (const item of cogsItems) {
-            const invItem = invMap.get(item.item_name);
-            let qtyInBase = item.quantity;
-            if (invItem && invItem.unit !== item.unit && invItem.secondary_unit === item.unit) {
-                if (invItem.conversion_operator === '*') {
-                    qtyInBase = item.quantity * (invItem.conversion_factor || 1);
-                } else {
-                    qtyInBase = item.quantity / (invItem.conversion_factor || 1);
-                }
-            }
-            const unitCost = costMap.get(item.item_name) || 0;
-            totalCogs += (qtyInBase * unitCost);
+            const itemAllocs = allocMap.get(item.id) || [];
+            totalCogs += costResolver.calculateItemCost(item, itemAllocs);
         }
 
-        const grossProfit = totalSales - totalCogs;
+        const netSales = totalSales - totalZara;
+        const grossProfit = netSales - totalCogs;
 
         const expFilter = getDateFilter(startDate, endDate, 'expense_date');
         const exps = db.prepare(`SELECT COALESCE(SUM(amount), 0) as val FROM expenses WHERE status = 'active' ${expFilter.filter}`).get(...expFilter.params).val;
@@ -330,52 +438,74 @@ exports.getAllProducts = (req, res) => {
         const items = db.prepare('SELECT * FROM inventory_items').all();
         
         const salesFilter = getDateFilter(startDate, endDate, 's.sale_date');
-        const purchFilter = getDateFilter(startDate, endDate, 'p.purchase_date');
+
+        // All non-cancelled purchase items for accurate cost
+        const allPurchaseItems = db.prepare(`
+            SELECT pi.item_name, pi.total_price, pi.base_quantity, p.purchase_date
+            FROM purchase_items pi
+            JOIN purchases p ON pi.purchase_id = p.id
+            WHERE p.status != 'CANCELLED'
+        `).all();
+
+        // Non-cancelled sales items in date range
+        const allSaleItems = db.prepare(`
+            SELECT si.item_name, si.quantity, si.unit, si.total_price, s.sale_date
+            FROM credit_sale_items si
+            JOIN credit_sales s ON si.credit_sale_id = s.id
+            WHERE s.status != 'CANCELLED' ${salesFilter.filter}
+        `).all(...salesFilter.params);
 
         const products = items.map(item => {
+            const normName = normalizeArabic(item.name);
+
             // Purchase cost avg (all time for accurate cost)
-            const row = db.prepare(`SELECT SUM(total_price) as total_cost, SUM(base_quantity) as total_qty FROM purchase_items WHERE item_name = ?`).get(item.name);
-            let avgCost = (row && row.total_qty > 0) ? (row.total_cost / row.total_qty) : 0;
+            let totalCostAllTime = 0;
+            let totalQtyAllTime = 0;
+            let periodPurchQty = 0;
+            let periodPurchCost = 0;
 
-            // Purchased Qty in period
-            const purchQtyRow = db.prepare(`
-                SELECT SUM(pi.base_quantity) as qty, SUM(pi.total_price) as cost
-                FROM purchase_items pi
-                JOIN purchases p ON pi.purchase_id = p.id
-                WHERE pi.item_name = ? ${purchFilter.filter.replace(/p\./g, 'p.')}
-            `).get(item.name, ...purchFilter.params);
+            for (const pi of allPurchaseItems) {
+                if (normalizeArabic(pi.item_name) === normName) {
+                    totalCostAllTime += (pi.total_price || 0);
+                    totalQtyAllTime += (pi.base_quantity || 0);
 
-            // Sold Qty in period
-            // Need to convert sales qty to base qty for accurate summing
-            const salesItems = db.prepare(`
-                SELECT si.quantity, si.unit, si.total_price 
-                FROM credit_sale_items si
-                JOIN credit_sales s ON si.credit_sale_id = s.id
-                WHERE si.item_name = ? AND s.status != 'CANCELLED' ${salesFilter.filter.replace(/s\./g, 's.')}
-            `).all(item.name, ...salesFilter.params);
+                    let matchPeriod = true;
+                    if (startDate && pi.purchase_date < startDate) matchPeriod = false;
+                    if (endDate && pi.purchase_date > endDate) matchPeriod = false;
+                    if (matchPeriod) {
+                        periodPurchQty += (pi.base_quantity || 0);
+                        periodPurchCost += (pi.total_price || 0);
+                    }
+                }
+            }
+
+            let avgCost = (totalQtyAllTime > 0) ? (totalCostAllTime / totalQtyAllTime) : (item.cost_price || 0);
 
             let soldQtyBase = 0;
             let salesRevenue = 0;
-            salesItems.forEach(si => {
-                let q = si.quantity;
-                if (si.unit !== item.unit && item.secondary_unit === si.unit) {
-                    if (item.conversion_operator === '*') {
-                        q = si.quantity * (item.conversion_factor || 1);
-                    } else {
-                        q = si.quantity / (item.conversion_factor || 1);
+
+            for (const si of allSaleItems) {
+                if (normalizeArabic(si.item_name) === normName) {
+                    let q = si.quantity || 0;
+                    if (si.unit && item.unit && normalizeArabic(si.unit) !== normalizeArabic(item.unit) && item.secondary_unit && normalizeArabic(si.unit) === normalizeArabic(item.secondary_unit)) {
+                        if (item.conversion_operator === '*') {
+                            q = q * (item.conversion_factor || 1);
+                        } else {
+                            q = q / (item.conversion_factor || 1);
+                        }
                     }
+                    soldQtyBase += q;
+                    salesRevenue += (si.total_price || 0);
                 }
-                soldQtyBase += q;
-                salesRevenue += si.total_price;
-            });
+            }
 
             const cogs = soldQtyBase * avgCost;
             const profit = salesRevenue - cogs;
 
             return {
                 ...item,
-                purchased_qty: purchQtyRow.qty || 0,
-                purchase_cost: purchQtyRow.cost || 0,
+                purchased_qty: periodPurchQty,
+                purchase_cost: periodPurchCost,
                 sold_qty: soldQtyBase,
                 sales_revenue: salesRevenue,
                 profit: profit,
@@ -385,6 +515,7 @@ exports.getAllProducts = (req, res) => {
 
         res.json(products);
     } catch(err) {
+        console.error('Error in getAllProducts:', err);
         res.status(500).json({ error: err.message });
     }
 };

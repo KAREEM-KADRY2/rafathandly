@@ -11,6 +11,7 @@ router.get('/:id/account-statement', customerController.getCustomerAccountStatem
 router.get('/:id/account-statement/pdf', customerController.downloadCustomerStatementPDF);
 router.get('/:id/account-statement/excel', customerController.downloadCustomerStatementExcel);
 router.get('/:id/whatsapp-statement', customerController.getWhatsappStatement);
+router.get('/:id/open-invoices', customerController.getCustomerOpenInvoices);
 router.post('/:id/adjustments', customerController.createAdjustment);
 router.post('/:id/zara', customerController.createAdjustment);
 router.delete('/:id/adjustments/:adjustmentId', customerController.deleteAdjustment);

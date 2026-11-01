@@ -5,12 +5,13 @@ import * as XLSX from 'xlsx';
 import { 
   FaFileInvoiceDollar, FaShoppingCart, FaChartLine, 
   FaMoneyBillWave, FaBoxes, FaBoxOpen, FaUsers, FaTruck,
-  FaFilePdf, FaFileExcel, FaHandshake
+  FaFilePdf, FaFileExcel, FaHandshake, FaBalanceScale
 } from 'react-icons/fa';
 
 import SalesTable from '../components/reports/SalesTable';
 import PurchasesTable from '../components/reports/PurchasesTable';
 import ProfitLossView from '../components/reports/ProfitLossView';
+import FinancialPositionView from '../components/reports/FinancialPositionView';
 import ExpensesTable from '../components/reports/ExpensesTable';
 import InventoryMovementsTable from '../components/reports/InventoryMovementsTable';
 import ProductsTable from '../components/reports/ProductsTable';
@@ -25,6 +26,7 @@ import { exportReportToExcel, exportReportToPDF } from '../utils/reportExportHel
 const API_BASE = '/api/reports-v2';
 
 const reportTypes = [
+  { id: 'financial-position', name: 'المركز المالي ورأس المال', icon: FaBalanceScale, desc: 'حسبة واضحة ومبسطة: بتعرفك كل اللي ليك، وكل اللي عليك، وبضاعتك في المخزن، وفلوسك الصافية الحقيقية كام بالظبط.' },
   { id: 'sales', name: 'المبيعات', icon: FaFileInvoiceDollar, desc: 'تقرير شامل للمبيعات يوضح إجمالي الفواتير، المبالغ المدفوعة والمتبقية، والأرباح.' },
   { id: 'purchases', name: 'المشتريات', icon: FaShoppingCart, desc: 'تقرير المشتريات يوضح فواتير الشراء والتكلفة الإجمالية.' },
   { id: 'profit-loss', name: 'الأرباح والخسائر', icon: FaChartLine, desc: 'تقرير الأرباح والخسائر: يوضح إجمالي المبيعات وتكلفة البضاعة المباعة والمصروفات وصافي الربح.' },
@@ -38,7 +40,7 @@ const reportTypes = [
 
 const Reports = () => {
   const [searchParams, setSearchParams] = useSearchParams();
-  const [activeReport, setActiveReport] = useState(() => searchParams.get('tab') || 'sales');
+  const [activeReport, setActiveReport] = useState(() => searchParams.get('tab') || 'financial-position');
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
 
@@ -147,6 +149,31 @@ const Reports = () => {
           </div>
         </div>
 
+        {/* Quick Report Type Tabs */}
+        <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-none">
+          {reportTypes.map(type => {
+            const Icon = type.icon;
+            const isSelected = activeReport === type.id;
+            return (
+              <button
+                key={type.id}
+                onClick={() => {
+                  setActiveReport(type.id);
+                  setSearchParams({ tab: type.id });
+                }}
+                className={`px-3.5 py-2 rounded-xl text-xs md:text-sm font-bold flex items-center gap-2 whitespace-nowrap transition cursor-pointer border ${
+                  isSelected 
+                    ? 'bg-blue-600 text-white border-blue-600 shadow-sm' 
+                    : 'bg-white text-gray-700 border-gray-200 hover:bg-gray-100'
+                }`}
+              >
+                <Icon className={isSelected ? 'text-white text-base' : 'text-blue-600 text-base'} />
+                <span>{type.name}</span>
+              </button>
+            );
+          })}
+        </div>
+
         {/* Filters */}
         <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-100 grid grid-cols-1 md:grid-cols-12 gap-4 items-end">
           
@@ -210,9 +237,10 @@ const Reports = () => {
         ) : data ? (
           <ErrorBoundary>
             <div id="report-printable-area" className="space-y-6">
-              {activeReport !== 'profit-loss' && data.summary && <ReportSummary summary={data.summary} type={activeReport} />}
+              {activeReport !== 'profit-loss' && activeReport !== 'financial-position' && data.summary && <ReportSummary summary={data.summary} type={activeReport} />}
               
               <div className="bg-white rounded-lg shadow-sm border border-gray-100 overflow-hidden">
+                {activeReport === 'financial-position' && <FinancialPositionView data={data} startDate={startDate} endDate={endDate} asOfDate={endDate || new Date().toISOString().split('T')[0]} />}
                 {activeReport === 'sales' && <SalesTable data={Array.isArray(data.sales) ? data.sales : (Array.isArray(data) ? data : [])} />}
                 {activeReport === 'purchases' && <PurchasesTable data={Array.isArray(data.purchases) ? data.purchases : (Array.isArray(data) ? data : [])} />}
                 {activeReport === 'profit-loss' && <ProfitLossView data={data} />}

@@ -1,5 +1,16 @@
 const db = require('../db');
 
+function normalizeArabic(str) {
+    if (!str) return '';
+    let s = String(str).trim()
+        .replace(/[أإآ]/g, 'ا')
+        .replace(/ة/g, 'ه')
+        .replace(/ى/g, 'ي');
+    if (s === 'شيكاره' || s === 'شيكارة' || s === 'شكاره' || s === 'شكارة') return 'شكاره';
+    if (s === 'كجم' || s === 'كيلوجرام' || s === 'كيلو جرام') return 'كيلو';
+    return s;
+}
+
 /**
  * =============================================
  * صافي الربح - Net Profit Controller
@@ -13,17 +24,33 @@ const db = require('../db');
  * يستخدم آخر سعر شراء معروف للمنتج
  */
 function getItemCostFromPurchases(itemName, saleDate) {
-    // البحث في purchase_items عن آخر سعر شراء لهذا المنتج قبل تاريخ البيع
-    const row = db.prepare(`
+    const rawName = (itemName || '').trim();
+    const normName = normalizeArabic(rawName);
+
+    // 1. البحث في purchase_items عن آخر سعر شراء لهذا المنتج قبل تاريخ البيع أو في نفس اليوم
+    let row = db.prepare(`
         SELECT pi.unit_price, pi.unit, pi.base_quantity, pi.base_unit
         FROM purchase_items pi
         JOIN purchases p ON pi.purchase_id = p.id
-        WHERE pi.item_name = ?
+        WHERE (TRIM(pi.item_name) = ? OR TRIM(pi.item_name) = ?)
           AND date(p.purchase_date) <= date(?)
-          AND p.status != 'cancelled'
-        ORDER BY p.purchase_date DESC
+          AND UPPER(p.status) != 'CANCELLED'
+        ORDER BY p.purchase_date DESC, pi.id DESC
         LIMIT 1
-    `).get(itemName, saleDate);
+    `).get(rawName, normName, saleDate);
+
+    // 2. إذا لم يوجد شراء قبل تاريخ البيع (مثل إدخال البيع قبل الشراء)، نأخذ أقرب سعر شراء متاح
+    if (!row) {
+        row = db.prepare(`
+            SELECT pi.unit_price, pi.unit, pi.base_quantity, pi.base_unit
+            FROM purchase_items pi
+            JOIN purchases p ON pi.purchase_id = p.id
+            WHERE (TRIM(pi.item_name) = ? OR TRIM(pi.item_name) = ?)
+              AND UPPER(p.status) != 'CANCELLED'
+            ORDER BY ABS(strftime('%s', p.purchase_date) - strftime('%s', ?)) ASC, pi.id DESC
+            LIMIT 1
+        `).get(rawName, normName, saleDate);
+    }
     
     return row || null;
 }
@@ -44,21 +71,27 @@ function calculateItemCOGS(saleItem, costRecord) {
     // مثال: إذا اشترينا بالطن وبعنا بالشيكارة
     if (costUnit && saleUnit && costUnit !== saleUnit) {
         // البحث عن معامل التحويل من جدول inventory_items
+        const rawItem = (saleItem.item_name || '').trim();
+        const normItem = normalizeArabic(rawItem);
         const convRow = db.prepare(`
-            SELECT conversion_factor, unit, secondary_unit 
+            SELECT conversion_factor, unit, secondary_unit, conversion_operator 
             FROM inventory_items 
-            WHERE name = ?
+            WHERE TRIM(name) = ? OR TRIM(name) = ?
             LIMIT 1
-        `).get(saleItem.item_name);
+        `).get(rawItem, normItem);
         
         if (convRow && convRow.conversion_factor > 0) {
-            // تحويل: إذا التكلفة بالطن والبيع بالشيكارة
-            if (costUnit === convRow.unit && saleUnit === convRow.secondary_unit) {
-                // cost per secondary_unit = cost_per_unit / conversion_factor
-                costPerUnit = costRecord.unit_price / convRow.conversion_factor;
-            } else if (costUnit === convRow.secondary_unit && saleUnit === convRow.unit) {
-                // cost per primary_unit = cost_per_secondary * conversion_factor
-                costPerUnit = costRecord.unit_price * convRow.conversion_factor;
+            const factor = parseFloat(convRow.conversion_factor);
+            const op = convRow.conversion_operator || '/';
+            const normCostUnit = normalizeArabic(costUnit);
+            const normSaleUnit = normalizeArabic(saleUnit);
+            const normConvUnit = normalizeArabic(convRow.unit);
+            const normConvSec = normalizeArabic(convRow.secondary_unit);
+
+            if (normCostUnit === normConvUnit && normSaleUnit === normConvSec) {
+                costPerUnit = (op === '*') ? (costRecord.unit_price * factor) : (costRecord.unit_price / factor);
+            } else if (normCostUnit === normConvSec && normSaleUnit === normConvUnit) {
+                costPerUnit = (op === '*') ? (costRecord.unit_price / factor) : (costRecord.unit_price * factor);
             }
         }
     }

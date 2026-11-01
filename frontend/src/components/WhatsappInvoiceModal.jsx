@@ -70,11 +70,24 @@ export default function WhatsappInvoiceModal({ customerId, customerName, onClose
         }
 
         const sale = data.sale;
-        const prevBal = sale.previous_customer_balance || 0;
-        const invTotal = sale.original_amount || 0;
-        const gross = prevBal + invTotal;
-        const paid = sale.paid_amount || 0;
-        const remaining = gross - paid;
+        const paymentsList = Array.isArray(sale.payments) ? sale.payments : [];
+        const hasMultiplePayments = paymentsList.length > 1;
+        const latestPayment = paymentsList.length > 0 ? paymentsList[0] : null;
+        const latestPaidAmount = Number(latestPayment?.amount || 0);
+        const totalPaidAmount = Number(sale.paid_amount || 0);
+        const earlierPaidAmount = Math.max(0, totalPaidAmount - latestPaidAmount);
+
+        const prevBal = Number(sale.previous_customer_balance || 0);
+        const invTotal = Number(sale.original_amount || 0);
+        const subTotal = prevBal + invTotal;
+
+        const balanceBeforeLatest = (sale.current_customer_balance !== undefined
+          ? Number(sale.current_customer_balance) + latestPaidAmount
+          : (subTotal - earlierPaidAmount));
+
+        const activePaid = hasMultiplePayments ? latestPaidAmount : totalPaidAmount;
+        const activePrev = hasMultiplePayments ? balanceBeforeLatest : prevBal;
+        const activeRem = hasMultiplePayments ? (balanceBeforeLatest - latestPaidAmount) : (subTotal - totalPaidAmount);
 
         const itemsSummary = sale.items?.map(i => `• ${i.item_name}: ${i.quantity} ${i.unit}`).join('\n') || '';
 
@@ -82,7 +95,16 @@ export default function WhatsappInvoiceModal({ customerId, customerName, onClose
           ? `• الرصيد الافتتاحي: ${Number(sale.opening_balance.amount).toLocaleString()} ج.م (${sale.opening_balance.balance_type === 'debit' ? 'مدين / عليه' : 'دائن / له'})\n`
           : '';
 
-        const textMsg = `مرحباً أستاذ/ة ${data.customer.name}\nمرفق تفاصيل فاتورة حسابكم كالتالي:\n${itemsSummary ? itemsSummary + '\n-------------------------\n' : ''}${obText}• الحساب السابق: ${prevBal.toLocaleString()} ج.م\n• فاتورة اليوم: ${invTotal.toLocaleString()} ج.م\n• الإجمالي: ${gross.toLocaleString()} ج.م\n• المدفوع: ${paid.toLocaleString()} ج.م\n• المتبقي المستحق: ${remaining.toLocaleString()} ج.م\n\nشكراً لتعاملكم معنا (${settings.company_name || 'الشركة'}).`;
+        const dateSuffix = latestPayment?.payment_date ? ` (بتاريخ ${latestPayment.payment_date.substring(0, 10)})` : '';
+        const paidLine = hasMultiplePayments 
+          ? `• المدفوع (آخر دفعة)${dateSuffix}: ${activePaid.toLocaleString()} ج.م` 
+          : `• المدفوع: ${activePaid.toLocaleString()} ج.م`;
+
+        const prevLine = hasMultiplePayments 
+          ? `• الحساب قبل آخر دفعة: ${activePrev.toLocaleString()} ج.م` 
+          : `• الحساب السابق: ${prevBal.toLocaleString()} ج.م`;
+
+        const textMsg = `مرحباً أستاذ/ة ${data.customer.name}\nمرفق تفاصيل فاتورة حسابكم كالتالي:\n${itemsSummary ? itemsSummary + '\n-------------------------\n' : ''}${obText}${prevLine}\n• فاتورة اليوم: ${invTotal.toLocaleString()} ج.م\n${paidLine}\n• المتبقي المستحق: ${activeRem.toLocaleString()} ج.م\n\nشكراً لتعاملكم معنا (${settings.company_name || 'الشركة'}).`;
 
         const whatsappUrl = `https://wa.me/${formattedPhone}?text=${encodeURIComponent(textMsg)}`;
         window.open(whatsappUrl, '_blank');
@@ -122,11 +144,31 @@ export default function WhatsappInvoiceModal({ customerId, customerName, onClose
 
   const sale = data.sale || {};
   const customer = data.customer || {};
+
+  const paymentsList = Array.isArray(sale.payments) ? sale.payments : [];
+  const hasMultiplePayments = paymentsList.length > 1;
+  const latestPayment = paymentsList.length > 0 ? paymentsList[0] : null;
+  const latestPaidAmount = Number(latestPayment?.amount || 0);
+  const totalPaidAmount = Number(sale.paid_amount || 0);
+  const earlierPaidAmount = Math.max(0, totalPaidAmount - latestPaidAmount);
+
+  const isShowingLatest = hasMultiplePayments;
+
   const previousBalance = Number(sale.previous_customer_balance) || 0;
   const invoiceTotal = Number(sale.original_amount) || 0;
   const subTotal = previousBalance + invoiceTotal;
-  const paidAmount = Number(sale.paid_amount) || 0;
-  const remainingBalance = subTotal - paidAmount;
+
+  // Balance immediately before the latest payment
+  const balanceBeforeLatest = (sale.current_customer_balance !== undefined
+    ? Number(sale.current_customer_balance) + latestPaidAmount
+    : (subTotal - earlierPaidAmount));
+
+  const activePreviousBalance = isShowingLatest ? balanceBeforeLatest : previousBalance;
+  const activeSubTotal = isShowingLatest ? balanceBeforeLatest : subTotal;
+  const activePaidAmount = isShowingLatest ? latestPaidAmount : totalPaidAmount;
+  const activeRemainingBalance = isShowingLatest 
+    ? (balanceBeforeLatest - latestPaidAmount) 
+    : (subTotal - totalPaidAmount);
 
   return (
     <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-sm" dir="rtl">
@@ -225,14 +267,7 @@ export default function WhatsappInvoiceModal({ customerId, customerName, onClose
               <div className="bg-[#f8f9fc] rounded-xl p-3.5 flex justify-between items-center mb-4 border border-gray-100">
                 <div className="text-right px-3">
                   <p className="text-gray-400 font-bold text-xs mb-0.5">اسم العميل:</p>
-                  <p className="text-xl font-black text-[#1a2b4c]">{customer.name}</p>
-                  {sale.opening_balance && Number(sale.opening_balance.amount) > 0 && (
-                    <div className="mt-1 flex items-center gap-2 text-[11px] font-bold text-indigo-700 bg-indigo-50 px-2.5 py-0.5 rounded border border-indigo-100 inline-flex">
-                      <span>الرصيد الافتتاحي:</span>
-                      <span dir="ltr">{Number(sale.opening_balance.amount).toLocaleString()} ج.م</span>
-                      <span>({sale.opening_balance.balance_type === 'debit' ? 'مدين / عليه' : 'دائن / له'})</span>
-                    </div>
-                  )}
+                  <p className="text-xl font-black text-[#1a2b4c] leading-normal">{customer.name}</p>
                 </div>
                 <div className="bg-[#3b82f6] text-white p-2.5 rounded-xl shadow-sm">
                   <User size={24} />
@@ -304,35 +339,41 @@ export default function WhatsappInvoiceModal({ customerId, customerName, onClose
                     </div>
                   </div>
 
-                  {/* Subtotal */}
+                  {/* Subtotal / Balance Before Latest Payment */}
                   <div className="p-3 px-3.5 flex items-center justify-between sm:justify-start gap-3 bg-amber-50/40">
                     <div className="bg-amber-500/15 text-amber-800 p-2 rounded-lg">
                       <Calculator size={18} />
                     </div>
                     <div>
-                      <div className="text-xs font-bold text-amber-800">إجمالي الحساب (سابق + حالي)</div>
+                      <div className="text-xs font-bold text-amber-800">
+                        {isShowingLatest ? 'الحساب قبل آخر دفعة' : 'إجمالي الحساب (سابق + حالي)'}
+                      </div>
                       <div className="text-base sm:text-lg font-black text-amber-900" dir="ltr">
-                        {subTotal.toLocaleString()} <span className="text-xs font-bold">ج.م</span>
+                        {activeSubTotal.toLocaleString()} <span className="text-xs font-bold">ج.م</span>
                       </div>
                     </div>
                   </div>
                 </div>
 
                 {/* Row 2: Payment & Remaining Balance */}
-                <div className={`grid ${paidAmount > 0 ? 'grid-cols-1 sm:grid-cols-2' : 'grid-cols-1'} divide-y sm:divide-y-0 sm:divide-x sm:divide-x-reverse divide-slate-700`}>
-                  {paidAmount > 0 && (
+                <div className={`grid ${activePaidAmount > 0 ? 'grid-cols-1 sm:grid-cols-2' : 'grid-cols-1'} divide-y sm:divide-y-0 sm:divide-x sm:divide-x-reverse divide-slate-700`}>
+                  {activePaidAmount > 0 && (
                     <div className="p-3 px-4 bg-emerald-50/80 flex items-center justify-between">
                       <div className="flex items-center gap-2.5">
                         <div className="bg-emerald-600 text-white p-1.5 rounded-lg shadow-xs">
                           <Wallet size={16} />
                         </div>
                         <div>
-                          <div className="text-xs font-bold text-emerald-900">المدفوع نقداً</div>
-                          <div className="text-[10px] font-semibold text-emerald-600">دفعة مسددة من الفاتورة</div>
+                          <div className="text-xs font-bold text-emerald-900">
+                            {isShowingLatest ? 'المدفوع (آخر دفعة)' : 'المدفوع نقداً'}
+                          </div>
+                          <div className="text-[10px] font-semibold text-emerald-700">
+                            {latestPayment?.payment_date ? `بتاريخ: ${latestPayment.payment_date.substring(0, 10)}` : ''}
+                          </div>
                         </div>
                       </div>
                       <div className="text-lg sm:text-xl font-black text-emerald-700" dir="ltr">
-                        - {paidAmount.toLocaleString()} <span className="text-xs font-bold">ج.م</span>
+                        - {activePaidAmount.toLocaleString()} <span className="text-xs font-bold">ج.م</span>
                       </div>
                     </div>
                   )}
@@ -343,14 +384,16 @@ export default function WhatsappInvoiceModal({ customerId, customerName, onClose
                         <Calculator size={18} />
                       </div>
                       <div>
-                        <div className="text-xs font-bold text-gray-300">الرصيد المتبقي المستحق</div>
+                        <div className="text-xs font-bold text-gray-300">
+                          {isShowingLatest ? 'الرصيد المتبقي المستحق الآن' : 'الرصيد المتبقي المستحق'}
+                        </div>
                         <div className="text-[10px] font-semibold text-amber-300">
-                          {remainingBalance === 0 ? '✔ تم سداد الفاتورة بالكامل' : 'متبقي مطلوب سداده'}
+                          {activeRemainingBalance === 0 ? '✔ تم سداد الفاتورة بالكامل' : 'متبقي مطلوب سداده'}
                         </div>
                       </div>
                     </div>
                     <div className="text-xl sm:text-2xl font-black text-[#facc15]" dir="ltr">
-                      {remainingBalance.toLocaleString()} <span className="text-xs font-bold text-amber-300">ج.م</span>
+                      {activeRemainingBalance.toLocaleString()} <span className="text-xs font-bold text-amber-300">ج.م</span>
                     </div>
                   </div>
                 </div>

@@ -209,14 +209,7 @@ export default function SaleDetailsModal({ saleId, onClose }) {
                 <div className="bg-[#f8f9fc] rounded-xl p-3.5 flex justify-between items-center mb-4 border border-gray-100">
                     <div className="text-right px-3">
                         <p className="text-gray-400 font-bold text-xs mb-0.5">اسم العميل:</p>
-                        <p className="text-xl font-black text-[#1a2b4c]">{sale.customer_name}</p>
-                        {sale.opening_balance && Number(sale.opening_balance.amount) > 0 && (
-                          <div className="mt-1 flex items-center gap-2 text-[11px] font-bold text-indigo-700 bg-indigo-50 px-2.5 py-0.5 rounded border border-indigo-100 inline-flex">
-                            <span>الرصيد الافتتاحي:</span>
-                            <span dir="ltr">{Number(sale.opening_balance.amount).toLocaleString()} ج.م</span>
-                            <span>({sale.opening_balance.balance_type === 'debit' ? 'مدين / عليه' : 'دائن / له'})</span>
-                          </div>
-                        )}
+                        <p className="text-xl font-black text-[#1a2b4c] leading-normal">{sale.customer_name}</p>
                     </div>
                     <div className="bg-[#3b82f6] text-white p-2.5 rounded-xl shadow-sm">
                         <User size={24} />
@@ -242,26 +235,6 @@ export default function SaleDetailsModal({ saleId, onClose }) {
                                     <td className="py-2.5 px-3.5 font-bold text-gray-500 text-sm">{index + 1}</td>
                                     <td className="py-2.5 px-3.5 font-black text-[#1a2b4c]">
                                         <div>{item.item_name}</div>
-                                        {item.allocations && item.allocations.length > 0 && (
-                                            <div className="flex flex-wrap gap-1.5 mt-1">
-                                                {item.allocations.map((alloc, aIdx) => (
-                                                    <span 
-                                                        key={aIdx} 
-                                                        className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[11px] font-bold bg-blue-50 text-blue-900 border border-blue-200"
-                                                    >
-                                                        <span className="w-1.5 h-1.5 rounded-full bg-blue-600"></span>
-                                                        <span className="text-blue-700">المصدر:</span>
-                                                        <span className="font-black text-blue-950">{alloc.supplier_name || 'غير محدد'}</span>
-                                                        <span className="text-[10px] text-blue-600 font-semibold">({(alloc.supplier_type === 'factory' || alloc.supplier_type === 'مصنع') ? 'مصنع' : 'مورد'})</span>
-                                                        {item.allocations.length > 1 && (
-                                                            <span className="bg-blue-200 text-blue-900 px-1 rounded text-[10px] font-black" dir="ltr">
-                                                                {alloc.quantity} {item.unit}
-                                                            </span>
-                                                        )}
-                                                    </span>
-                                                ))}
-                                            </div>
-                                        )}
                                     </td>
                                     <td className="py-2.5 px-3.5 font-bold text-sm">
                                       <span>{item.quantity} {item.unit}</span>

@@ -417,6 +417,56 @@ export function extractReportData(reportType, data) {
       break;
     }
 
+    case 'financial-position': {
+      const a = data.assets || {};
+      const l = data.liabilities || {};
+      const np = data.netPosition || {};
+      const pl = data.profitLossSummary || {};
+      const cs = data.customerSummary || {};
+      const ss = data.supplierSummary || {};
+      const inv = data.inventorySummary || {};
+
+      const netAssets = Number(np.netAssets || 0);
+      const totalAssets = Number(a.totalAssets || 0);
+      const totalLiabilities = Number(l.totalLiabilities || 0);
+      const netProfit = Number(pl.netProfit || 0);
+
+      summaryItems = [
+        { label: 'صافي رأس مالك وفلوسك الحقيقية', value: formatEGP(netAssets), num: netAssets, color: 'emerald' },
+        { label: 'كل ممتلكات وفلوس الشركة', value: formatEGP(totalAssets), num: totalAssets, color: 'blue' },
+        { label: 'كل الديون اللي علينا للموردين', value: formatEGP(totalLiabilities), num: totalLiabilities, color: 'rose' },
+        { label: 'فلوس كاش وفي البنوك', value: formatEGP(a.liquidCash || 0), num: a.liquidCash || 0, color: 'teal' },
+        { label: 'فلوسنا برة عند الزباين', value: formatEGP(a.customerReceivables || 0), num: a.customerReceivables || 0, color: 'indigo' },
+        { label: 'بضاعة في المخزن بسعر الشراء', value: formatEGP(a.inventoryAtCost || 0), num: a.inventoryAtCost || 0, color: 'amber' },
+        { label: 'ديون علينا للموردين', value: formatEGP(l.supplierPayables || 0), num: l.supplierPayables || 0, color: 'rose' },
+        { label: 'صافي مكسبي في الفترة', value: formatEGP(netProfit), num: netProfit, color: netProfit >= 0 ? 'emerald' : 'rose' },
+      ];
+
+      rows = [
+        { statement: '1. فلوس كاش في الخزنة والبنوك والمحافظ', category: 'ممتلكات وفلوس الشركة', amount: a.liquidCash || 0, note: 'خزينة وبنوك ومحافظ' },
+        { statement: '2. فلوس لينا برة عند الزباين (آجل)', category: 'ممتلكات وفلوس الشركة', amount: a.customerReceivables || 0, note: `${cs.indebtedCustomersCount || 0} عميل عليه حساب` },
+        { statement: '3. قيمة البضاعة في المخزن (بسعر التكلفة والشراء)', category: 'ممتلكات وفلوس الشركة', amount: a.inventoryAtCost || 0, note: `${inv.itemsCount || 0} صنف بالمخزن` },
+        { statement: '4. فلوس لينا دافعينها مقدم للمصانع', category: 'ممتلكات وفلوس الشركة', amount: a.factoryAdvances || 0, note: 'دفعات ورصيد مشتريات' },
+        { statement: '(=) إجمالي كل ممتلكات وفلوس الشركة', category: 'إجمالي اللي لينا', amount: totalAssets, isTotal: true, note: 'مجموع ما نملكه' },
+        { statement: '5. ديون علينا لموردي البضاعة والحديد', category: 'ديون والتزامات', amount: l.supplierPayables || 0, note: `${ss.indebtedSuppliersCount || 0} مورد ليه فلوس` },
+        { statement: '(=) إجمالي كل الديون اللي علينا برة', category: 'إجمالي اللي علينا', amount: totalLiabilities, isTotal: true, note: 'مجموع الديون' },
+        { statement: '(=) صافي رأس مالك وفلوسك الحقيقية', category: 'صافي رأس المال', amount: netAssets, isTotal: true, note: 'كل اللي تملكه ناقص الديون' },
+        { statement: '6. إيرادات المبيعات في الفترة', category: 'أرباح ومصاريف', amount: pl.netRevenue || 0, note: 'صافي المبيعات' },
+        { statement: '7. (-) تكلفة البضاعة اللي اتباعت', category: 'أرباح ومصاريف', amount: pl.cogs || 0, note: 'بسعر شرائها الأصلي' },
+        { statement: '8. (=) مكسب البيع (قبل المصاريف)', category: 'أرباح ومصاريف', amount: pl.grossProfit || 0, note: 'مجمل الربح' },
+        { statement: '9. (-) مصاريف الشغل والعمال', category: 'أرباح ومصاريف', amount: pl.operatingExpenses || 0, note: 'مصاريف ومسحوبات عمال' },
+        { statement: '10. (=) صافي مكسبي الحقيقي', category: 'أرباح ومصاريف', amount: netProfit, isTotal: true, note: `نسبة المكسب ${pl.profitMargin || 0}%` },
+      ];
+
+      totals = {
+        totalAssets,
+        totalLiabilities,
+        netAssets,
+        netProfit
+      };
+      break;
+    }
+
     default:
       break;
   }
@@ -429,7 +479,7 @@ export function extractReportData(reportType, data) {
  */
 export function exportReportToExcel({ reportType, reportName, dateRange, data, settings }) {
   const { rows, summaryItems, totals } = extractReportData(reportType, data);
-  if (!rows || (rows.length === 0 && reportType !== 'profit-loss')) {
+  if (!rows || (rows.length === 0 && reportType !== 'profit-loss' && reportType !== 'financial-position')) {
     alert('لا توجد بيانات متاحة للتصدير');
     return;
   }
@@ -533,6 +583,11 @@ export function exportReportToExcel({ reportType, reportName, dateRange, data, s
       totalsRow = ['الإجمالي العام', '', '', totals.sumCapital, totals.sumWithdrawn, totals.sumReturned, totals.sumNet, '', totals.sumBalance, ''];
       break;
 
+    case 'financial-position':
+      headers = ['بيان الحساب في المركز المالي / الميزانية', 'التصنيف المحاسبي', 'المبلغ (ج.م)', 'ملاحظات وإيضاحات'];
+      tableRows = rows.map(r => [r.statement, r.category, r.amount, r.note || '']);
+      break;
+
     default:
       break;
   }
@@ -582,7 +637,7 @@ export function exportReportToExcel({ reportType, reportName, dateRange, data, s
  */
 export function exportReportToPDF({ reportType, reportName, dateRange, data, settings }) {
   const { rows, summaryItems, totals } = extractReportData(reportType, data);
-  if (!rows || (rows.length === 0 && reportType !== 'profit-loss')) {
+  if (!rows || (rows.length === 0 && reportType !== 'profit-loss' && reportType !== 'financial-position')) {
     alert('لا توجد بيانات متاحة للتصدير');
     return;
   }
@@ -964,6 +1019,36 @@ export function exportReportToPDF({ reportType, reportName, dateRange, data, set
           <td></td>
           <td style="text-align: center; color: #1e3a8a;" dir="ltr">${formatEGP(totals.sumBalance)}</td>
           <td></td>
+        </tr>
+      `;
+      break;
+
+    case 'financial-position':
+      tableHeadersHtml = `
+        <tr>
+          <th>بيان الحساب في قائمة المركز المالي والميزانية</th>
+          <th style="width: 140px; text-align: center;">التصنيف</th>
+          <th style="width: 160px; text-align: center;">المبلغ (ج.م)</th>
+          <th style="width: 160px; text-align: center;">ملاحظات وإيضاحات</th>
+        </tr>
+      `;
+      tableBodyHtml = rows.map(r => `
+        <tr style="${r.isTotal ? 'background: #f1f5f9; font-weight: 900;' : ''}">
+          <td style="font-weight: ${r.isTotal ? '900' : '700'}; font-size: ${r.isTotal ? '13px' : '11px'}; color: ${r.isTotal ? '#1a2b4c' : '#1e293b'};">
+            ${r.statement}
+          </td>
+          <td style="text-align: center; font-size: 10px; color: #64748b;">${r.category}</td>
+          <td style="text-align: center; font-weight: 800; font-size: ${r.isTotal ? '14px' : '12px'}; color: ${r.amount >= 0 ? '#166534' : '#b91c1c'};" dir="ltr">
+            ${formatEGP(r.amount)}
+          </td>
+          <td style="text-align: center; font-size: 10px; color: #475569;">${r.note || '-'}</td>
+        </tr>
+      `).join('');
+      tableFootHtml = `
+        <tr style="background: #f8fafc;">
+          <td colspan="4" style="padding: 12px; font-size: 11px; color: #475569;">
+            <strong>ملاحظة:</strong> صافي رأس المال الحقيقي بيمثل كل ممتلكات وفلوس الشركة مطروح منها كل الديون المستحقة للموردين في تاريخ التقرير.
+          </td>
         </tr>
       `;
       break;

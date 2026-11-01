@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { X } from 'lucide-react';
 import api from '../api';
 
-export default function TreasuryVoucherModal({ isOpen, type, editingVoucher, initialAccountId, onClose, onSuccess }) {
+export default function TreasuryVoucherModal({ isOpen, type, editingVoucher, initialAccountId, onClose, onSuccess, onPrintVoucher }) {
   const isReceipt = (editingVoucher ? editingVoucher.type === 'IN' : type === 'receipt');
   
   const [formData, setFormData] = useState({
@@ -20,6 +20,8 @@ export default function TreasuryVoucherModal({ isOpen, type, editingVoucher, ini
   const [entities, setEntities] = useState([]);
   const [accounts, setAccounts] = useState([]);
   const [fetching, setFetching] = useState(false);
+  const [openInvoices, setOpenInvoices] = useState([]);
+  const [selectedInvoiceId, setSelectedInvoiceId] = useState('');
 
   useEffect(() => {
     if (!isOpen) return;
@@ -39,6 +41,7 @@ export default function TreasuryVoucherModal({ isOpen, type, editingVoucher, ini
         transaction_date: editingVoucher.date ? editingVoucher.date.substring(0, 10) : new Date().toLocaleDateString('en-CA', { timeZone: 'Africa/Cairo' }),
         description: editingVoucher.description || ''
       });
+      setSelectedInvoiceId(editingVoucher.reference_id || '');
     } else {
       setFormData({
         party_type: 'other',
@@ -50,6 +53,8 @@ export default function TreasuryVoucherModal({ isOpen, type, editingVoucher, ini
         transaction_date: new Date().toLocaleDateString('en-CA', { timeZone: 'Africa/Cairo' }),
         description: ''
       });
+      setSelectedInvoiceId('');
+      setOpenInvoices([]);
     }
   }, [isOpen, editingVoucher]);
   
@@ -59,6 +64,8 @@ export default function TreasuryVoucherModal({ isOpen, type, editingVoucher, ini
     
     if (formData.party_type === 'other') {
       setEntities([]);
+      setOpenInvoices([]);
+      setSelectedInvoiceId('');
       return;
     }
     
@@ -97,6 +104,44 @@ export default function TreasuryVoucherModal({ isOpen, type, editingVoucher, ini
     fetchEntities();
   }, [formData.party_type, isOpen]);
 
+  // Fetch open invoices when party_id changes
+  useEffect(() => {
+    if (!isOpen || !formData.party_id) {
+      setOpenInvoices([]);
+      setSelectedInvoiceId('');
+      return;
+    }
+
+    if (formData.party_type === 'customer') {
+      api.get(`/customers/${formData.party_id}/open-invoices`)
+        .then(res => {
+          const invs = Array.isArray(res.data) ? res.data : [];
+          setOpenInvoices(invs);
+          if (invs.length > 0 && !editingVoucher) {
+            setSelectedInvoiceId(String(invs[0].id));
+          } else if (!editingVoucher) {
+            setSelectedInvoiceId('');
+          }
+        })
+        .catch(() => setOpenInvoices([]));
+    } else if (formData.party_type === 'supplier' || formData.party_type === 'factory') {
+      api.get(`/purchases/supplier/${formData.party_id}/open-invoices`)
+        .then(res => {
+          const invs = Array.isArray(res.data) ? res.data : [];
+          setOpenInvoices(invs);
+          if (invs.length > 0 && !editingVoucher) {
+            setSelectedInvoiceId(String(invs[0].id));
+          } else if (!editingVoucher) {
+            setSelectedInvoiceId('');
+          }
+        })
+        .catch(() => setOpenInvoices([]));
+    } else {
+      setOpenInvoices([]);
+      setSelectedInvoiceId('');
+    }
+  }, [formData.party_id, formData.party_type, isOpen]);
+
   if (!isOpen) return null;
 
   const handleSubmit = async (e) => {
@@ -112,15 +157,18 @@ export default function TreasuryVoucherModal({ isOpen, type, editingVoucher, ini
         }
       }
 
+      let savedVoucherRes;
       if (editingVoucher) {
-        await api.put(`/treasury/voucher/${editingVoucher.id}`, { 
+        savedVoucherRes = await api.put(`/treasury/voucher/${editingVoucher.id}`, { 
           ...formData, 
+          invoice_id: selectedInvoiceId || null,
           party_name: finalName,
           type: editingVoucher.type || (isReceipt ? 'IN' : 'OUT')
         });
       } else {
-        await api.post('/treasury/voucher', { 
+        savedVoucherRes = await api.post('/treasury/voucher', { 
           ...formData, 
+          invoice_id: selectedInvoiceId || null,
           party_name: finalName,
           type 
         });
@@ -221,6 +269,39 @@ export default function TreasuryVoucherModal({ isOpen, type, editingVoucher, ini
               )}
             </div>
           </div>
+
+          {openInvoices.length > 0 && (
+            <div className="bg-blue-50/70 p-3 rounded-xl border border-blue-200">
+              <label className="block text-xs font-black text-blue-900 mb-1.5 flex justify-between items-center">
+                <span>{formData.party_type === 'customer' ? 'ربط بفاتورة مبيعات محددة (اختياري)' : 'ربط بفاتورة شراء محددة (اختياري)'}</span>
+                <span className="text-[10px] text-blue-700 bg-blue-100 px-2 py-0.5 rounded font-bold">{openInvoices.length} فواتير مفتوحة</span>
+              </label>
+              <select
+                value={selectedInvoiceId}
+                onChange={(e) => {
+                  const invId = e.target.value;
+                  setSelectedInvoiceId(invId);
+                  if (invId) {
+                    const found = openInvoices.find(inv => String(inv.id) === String(invId));
+                    if (found && (!formData.amount || Number(formData.amount) === 0)) {
+                      setFormData(prev => ({ ...prev, amount: found.remaining_amount }));
+                    }
+                  }
+                }}
+                className="w-full p-2 border-2 border-blue-300 rounded-lg focus:ring-2 focus:ring-blue-500 bg-white font-bold text-xs text-[#1a2b4c]"
+              >
+                <option value="">-- سداد عام على الحساب (توزيع تلقائي) --</option>
+                {openInvoices.map(inv => (
+                  <option key={inv.id} value={inv.id}>
+                    فاتورة #{inv.invoice_number || inv.id} ({inv.sale_date ? inv.sale_date.substring(0, 10) : (inv.purchase_date ? inv.purchase_date.substring(0, 10) : '')}) - متبقي: {Number(inv.remaining_amount).toLocaleString()} ج.م
+                  </option>
+                ))}
+              </select>
+              <p className="text-[10px] text-blue-800 mt-1 font-semibold">
+                * عند تحديد فاتورة، سيتم خصم هذا السند مباشرة من الفاتورة المحددة وتظهر بوضوح في تفاصيل الفاتورة عند الطباعة.
+              </p>
+            </div>
+          )}
 
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">

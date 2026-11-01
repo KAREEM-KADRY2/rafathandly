@@ -236,6 +236,12 @@ exports.createPurchase = (req, res) => {
         });
 
         const newPurchaseId = transaction();
+        
+        try {
+            const treasuryController = require('./treasuryController');
+            treasuryController.reallocateSupplierPurchases(supplier_id);
+        } catch (e) {}
+
         res.status(201).json({ id: newPurchaseId, message: 'تم تسجيل فاتورة الشراء بنجاح' });
     } catch (error) {
         res.status(400).json({ error: error.message });
@@ -334,13 +340,25 @@ exports.getPurchaseById = (req, res) => {
         purchase.total_purchased_quantity = Math.round(overallPurchased * 10000) / 10000;
         purchase.total_sold_quantity = Math.round(overallSold * 10000) / 10000;
         purchase.total_remaining_quantity = Math.round(overallRemaining * 10000) / 10000;
-        purchase.payments = [];
+        const purchPayments = db.prepare(`
+            SELECT sbt.id, ABS(sbt.amount) as amount, sbt.created_at as payment_date, sbt.description, sbt.reference_number, fa.name as account_name
+            FROM supplier_balance_transactions sbt
+            LEFT JOIN financial_accounts fa ON sbt.account_id = fa.id
+            WHERE sbt.supplier_id = ? AND (sbt.reference_number = ? OR sbt.reference_number = ?) AND sbt.amount < 0
+            ORDER BY sbt.created_at DESC, sbt.id DESC
+        `).all(purchase.supplier_id, String(purchase.id), purchase.invoice_number || '');
+        purchase.payments = purchPayments;
+
         const isOverdue = purchase.remaining_amount > 0 && purchase.due_date && purchase.due_date.split(' ')[0] < new Date().toISOString().split('T')[0];
         purchase.is_overdue = isOverdue;
         purchase.computed_status = (purchase.payment_type === 'cash' || purchase.remaining_amount <= 0)
             ? 'PAID' 
             : (isOverdue ? 'OVERDUE' : (purchase.paid_amount > 0 ? 'PARTIALLY_PAID' : 'UNPAID'));
         
+        const suppBal = db.prepare('SELECT balance FROM suppliers WHERE id = ?').get(purchase.supplier_id)?.balance || 0;
+        purchase.current_supplier_balance = suppBal;
+        purchase.previous_supplier_balance = suppBal - (purchase.remaining_amount || 0);
+
         const obRow = db.prepare("SELECT balance_type, amount, effective_date, notes FROM opening_balances WHERE entity_type IN ('supplier', 'factory') AND entity_id = ?").get(purchase.supplier_id);
         purchase.opening_balance = obRow ? {
             amount: Number(obRow.amount) || 0,
@@ -352,6 +370,21 @@ exports.getPurchaseById = (req, res) => {
         res.json(purchase);
     } catch (error) {
         res.status(500).json({ error: error.message });
+    }
+};
+
+exports.getSupplierOpenInvoices = (req, res) => {
+    try {
+        const { supplierId } = req.params;
+        const purchases = db.prepare(`
+            SELECT id, invoice_number, total_amount, paid_amount, remaining_amount, purchase_date, status
+            FROM purchases
+            WHERE supplier_id = ? AND status != 'CANCELLED' AND remaining_amount > 0
+            ORDER BY datetime(purchase_date) DESC, id DESC
+        `).all(supplierId);
+        res.json(purchases);
+    } catch (e) {
+        res.status(500).json({ error: e.message });
     }
 };
 

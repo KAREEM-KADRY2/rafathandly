@@ -211,7 +211,27 @@ exports.getWhatsappStatement = (req, res) => {
             AS total
         `);
         const current_customer_balance = currentBalStmt.get(id, id, id, id).total;
-        const previous_customer_balance = current_customer_balance - latestSale.remaining_amount;
+
+        const prevSalesRow = db.prepare(`
+            SELECT COALESCE(SUM(original_amount - COALESCE(zara_amount, 0)), 0) as val
+            FROM credit_sales
+            WHERE customer_id = ? AND status != 'CANCELLED' 
+              AND (datetime(sale_date) < datetime(?) OR (datetime(sale_date) = datetime(?) AND id < ?))
+        `).get(id, latestSale.sale_date, latestSale.sale_date, latestSale.id);
+
+        const prevPaymentsRow = db.prepare(`
+            SELECT COALESCE(SUM(amount), 0) as val
+            FROM customer_payments
+            WHERE customer_id = ? AND (datetime(payment_date) < datetime(?) OR (datetime(payment_date) = datetime(?) AND credit_sale_id IS NOT NULL AND credit_sale_id < ?))
+        `).get(id, latestSale.sale_date, latestSale.sale_date, latestSale.id);
+
+        const prevAdjustmentsRow = db.prepare(`
+            SELECT COALESCE(SUM(amount), 0) as val
+            FROM customer_adjustments
+            WHERE customer_id = ? AND datetime(created_at) < datetime(?)
+        `).get(id, latestSale.sale_date);
+
+        const previous_customer_balance = openingBal + (prevSalesRow?.val || 0) - (prevPaymentsRow?.val || 0) - (prevAdjustmentsRow?.val || 0);
 
         const rawItems = db.prepare('SELECT * FROM credit_sale_items WHERE credit_sale_id = ?').all(latestSale.id);
         const invItems = db.prepare('SELECT name, unit, secondary_unit, conversion_factor, conversion_operator FROM inventory_items').all();
@@ -255,7 +275,7 @@ exports.getWhatsappStatement = (req, res) => {
             };
         });
 
-        const payments = db.prepare('SELECT * FROM customer_payments WHERE credit_sale_id = ? ORDER BY payment_date DESC').all(latestSale.id);
+        const payments = db.prepare('SELECT * FROM customer_payments WHERE credit_sale_id = ? ORDER BY payment_date DESC, id DESC').all(latestSale.id);
 
         res.json({
             sale: {
@@ -921,5 +941,20 @@ exports.downloadCustomerStatementExcel = async (req, res) => {
         res.end();
     } catch (error) {
         res.status(500).json({ error: error.message });
+    }
+};
+
+exports.getCustomerOpenInvoices = (req, res) => {
+    try {
+        const { id } = req.params;
+        const invoices = db.prepare(`
+            SELECT id, invoice_number, original_amount, paid_amount, remaining_amount, sale_date, status
+            FROM credit_sales
+            WHERE customer_id = ? AND status != 'CANCELLED' AND remaining_amount > 0
+            ORDER BY datetime(sale_date) DESC, id DESC
+        `).all(id);
+        res.json(invoices);
+    } catch (e) {
+        res.status(500).json({ error: e.message });
     }
 };

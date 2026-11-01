@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { X, Printer, User, Wallet, Receipt, Calculator, Calendar, FileText, Phone, MapPin, Edit3 } from 'lucide-react';
+import { X, Printer, User, Wallet, Receipt, Calculator, Calendar, FileText, Phone, MapPin, Edit3, Share2, CheckCircle2 } from 'lucide-react';
 import api from '../api';
-import { Share2 } from 'lucide-react';
 import html2canvas from 'html2canvas';
 import { useSettings } from '../context/SettingsContext';
 import EditSaleModal from './EditSaleModal';
@@ -11,6 +10,7 @@ export default function SaleDetailsModal({ saleId, onClose }) {
   const [sale, setSale] = useState(null);
   const [loading, setLoading] = useState(true);
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
+  const [showLatestOnly, setShowLatestOnly] = useState(true);
   const printRef = useRef();
   const invoiceRef = useRef(null);
   const [isGenerating, setIsGenerating] = useState(false);
@@ -95,12 +95,33 @@ export default function SaleDetailsModal({ saleId, onClose }) {
 
   if (!sale) return null;
 
-  // Calculations for display
-  const previousBalance = sale.previous_customer_balance || 0;
-  const invoiceTotal = sale.original_amount || 0;
+  // Payments breakdown & analysis
+  const paymentsList = Array.isArray(sale.payments) ? sale.payments : [];
+  const hasMultiplePayments = paymentsList.length > 1;
+  const latestPayment = paymentsList.length > 0 ? paymentsList[0] : null; // newest payment (ORDER BY DESC)
+  const latestPaidAmount = Number(latestPayment?.amount || 0);
+  const totalPaidAmount = Number(sale.paid_amount || 0);
+  const earlierPaidAmount = Math.max(0, totalPaidAmount - latestPaidAmount);
+
+  // When true and multiple payments exist, display the latest payment and the balance right before it
+  const isShowingLatest = showLatestOnly && hasMultiplePayments;
+
+  const previousBalance = Number(sale.previous_customer_balance || 0);
+  const invoiceTotal = Number(sale.original_amount || 0);
   const subTotal = previousBalance + invoiceTotal;
-  const paidAmount = sale.paid_amount || 0;
-  const remainingBalance = subTotal - paidAmount;
+
+  // Balance immediately before the latest payment
+  const balanceBeforeLatest = (sale.current_customer_balance !== undefined
+    ? Number(sale.current_customer_balance) + latestPaidAmount
+    : (subTotal - earlierPaidAmount));
+
+  // Active display values
+  const activePreviousBalance = isShowingLatest ? balanceBeforeLatest : previousBalance;
+  const activeSubTotal = isShowingLatest ? balanceBeforeLatest : subTotal;
+  const activePaidAmount = isShowingLatest ? latestPaidAmount : totalPaidAmount;
+  const activeRemainingBalance = isShowingLatest 
+    ? (balanceBeforeLatest - latestPaidAmount) 
+    : (subTotal - totalPaidAmount);
 
   return (
     <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-sm" dir="rtl">
@@ -209,14 +230,7 @@ export default function SaleDetailsModal({ saleId, onClose }) {
                 <div className="bg-[#f8f9fc] rounded-xl p-3.5 flex justify-between items-center mb-4 border border-gray-100">
                     <div className="text-right px-3">
                         <p className="text-gray-400 font-bold text-xs mb-0.5">اسم العميل:</p>
-                        <p className="text-xl font-black text-[#1a2b4c]">{sale.customer_name}</p>
-                        {sale.opening_balance && Number(sale.opening_balance.amount) > 0 && (
-                          <div className="mt-1 flex items-center gap-2 text-[11px] font-bold text-indigo-700 bg-indigo-50 px-2.5 py-0.5 rounded border border-indigo-100 inline-flex">
-                            <span>الرصيد الافتتاحي:</span>
-                            <span dir="ltr">{Number(sale.opening_balance.amount).toLocaleString()} ج.م</span>
-                            <span>({sale.opening_balance.balance_type === 'debit' ? 'مدين / عليه' : 'دائن / له'})</span>
-                          </div>
-                        )}
+                        <p className="text-xl font-black text-[#1a2b4c] leading-normal">{sale.customer_name}</p>
                     </div>
                     <div className="bg-[#3b82f6] text-white p-2.5 rounded-xl shadow-sm">
                         <User size={24} />
@@ -242,26 +256,6 @@ export default function SaleDetailsModal({ saleId, onClose }) {
                                     <td className="py-2.5 px-3.5 font-bold text-gray-500 text-sm">{index + 1}</td>
                                     <td className="py-2.5 px-3.5 font-black text-[#1a2b4c]">
                                         <div>{item.item_name}</div>
-                                        {item.allocations && item.allocations.length > 0 && (
-                                            <div className="flex flex-wrap gap-1.5 mt-1">
-                                                {item.allocations.map((alloc, aIdx) => (
-                                                    <span 
-                                                        key={aIdx} 
-                                                        className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[11px] font-bold bg-blue-50 text-blue-900 border border-blue-200"
-                                                    >
-                                                        <span className="w-1.5 h-1.5 rounded-full bg-blue-600"></span>
-                                                        <span className="text-blue-700">المصدر:</span>
-                                                        <span className="font-black text-blue-950">{alloc.supplier_name || 'غير محدد'}</span>
-                                                        <span className="text-[10px] text-blue-600 font-semibold">({(alloc.supplier_type === 'factory' || alloc.supplier_type === 'مصنع') ? 'مصنع' : 'مورد'})</span>
-                                                        {item.allocations.length > 1 && (
-                                                            <span className="bg-blue-200 text-blue-900 px-1 rounded text-[10px] font-black" dir="ltr">
-                                                                {alloc.quantity} {item.unit}
-                                                            </span>
-                                                        )}
-                                                    </span>
-                                                ))}
-                                            </div>
-                                        )}
                                     </td>
                                     <td className="py-2.5 px-3.5 font-bold text-sm">
                                       <span>{item.quantity} {item.unit}</span>
@@ -285,7 +279,9 @@ export default function SaleDetailsModal({ saleId, onClose }) {
                                 <Wallet size={18} />
                             </div>
                             <div>
-                                <div className="text-xs font-bold text-gray-500">الحساب السابق</div>
+                                <div className="text-xs font-bold text-gray-500">
+                                  {isShowingLatest ? 'الحساب السابق (قبل الفاتورة)' : 'الحساب السابق'}
+                                </div>
                                 <div className="text-base sm:text-lg font-black text-gray-800" dir="ltr">
                                     {Number(previousBalance || 0).toLocaleString()} <span className="text-xs font-bold text-gray-500">ج.م</span>
                                 </div>
@@ -310,35 +306,41 @@ export default function SaleDetailsModal({ saleId, onClose }) {
                             </div>
                         </div>
 
-                        {/* Subtotal */}
+                        {/* Subtotal / Balance Before Latest Payment */}
                         <div className="p-3 px-3.5 flex items-center justify-between sm:justify-start gap-3 bg-amber-50/40">
                             <div className="bg-amber-500/15 text-amber-800 p-2 rounded-lg">
                                 <Calculator size={18} />
                             </div>
                             <div>
-                                <div className="text-xs font-bold text-amber-800">إجمالي الحساب (سابق + حالي)</div>
+                                <div className="text-xs font-bold text-amber-800">
+                                  {isShowingLatest ? 'الحساب قبل آخر دفعة' : 'إجمالي الحساب (سابق + حالي)'}
+                                </div>
                                 <div className="text-base sm:text-lg font-black text-amber-900" dir="ltr">
-                                    {Number(subTotal || 0).toLocaleString()} <span className="text-xs font-bold">ج.م</span>
+                                    {Number(activeSubTotal || 0).toLocaleString()} <span className="text-xs font-bold">ج.م</span>
                                 </div>
                             </div>
                         </div>
                     </div>
 
                     {/* Row 2: Payment & Remaining Balance */}
-                    <div className={`grid ${paidAmount > 0 ? 'grid-cols-1 sm:grid-cols-2' : 'grid-cols-1'} divide-y sm:divide-y-0 sm:divide-x sm:divide-x-reverse divide-slate-700`}>
-                        {paidAmount > 0 && (
+                    <div className={`grid ${activePaidAmount > 0 ? 'grid-cols-1 sm:grid-cols-2' : 'grid-cols-1'} divide-y sm:divide-y-0 sm:divide-x sm:divide-x-reverse divide-slate-700`}>
+                        {activePaidAmount > 0 && (
                             <div className="p-3 px-4 bg-emerald-50/80 flex items-center justify-between">
                                 <div className="flex items-center gap-2.5">
                                     <div className="bg-emerald-600 text-white p-1.5 rounded-lg shadow-xs">
                                         <Wallet size={16} />
                                     </div>
                                     <div>
-                                        <div className="text-xs font-bold text-emerald-900">المدفوع نقداً</div>
-                                        <div className="text-[10px] font-semibold text-emerald-600">دفعة مسددة من الفاتورة</div>
+                                        <div className="text-xs font-bold text-emerald-900">
+                                          {isShowingLatest ? 'المدفوع (آخر دفعة)' : 'المدفوع نقداً'}
+                                        </div>
+                                        <div className="text-[10px] font-semibold text-emerald-700">
+                                          {latestPayment?.payment_date ? `بتاريخ: ${latestPayment.payment_date.substring(0, 10)}` : ''}
+                                        </div>
                                     </div>
                                 </div>
                                 <div className="text-lg sm:text-xl font-black text-emerald-700" dir="ltr">
-                                    - {Number(paidAmount || 0).toLocaleString()} <span className="text-xs font-bold">ج.م</span>
+                                    - {Number(activePaidAmount || 0).toLocaleString()} <span className="text-xs font-bold">ج.م</span>
                                 </div>
                             </div>
                         )}
@@ -349,14 +351,16 @@ export default function SaleDetailsModal({ saleId, onClose }) {
                                     <Calculator size={18} />
                                 </div>
                                 <div>
-                                    <div className="text-xs font-bold text-gray-300">الرصيد المتبقي المستحق</div>
+                                    <div className="text-xs font-bold text-gray-300">
+                                      {isShowingLatest ? 'الرصيد المتبقي المستحق الآن' : 'الرصيد المتبقي المستحق'}
+                                    </div>
                                     <div className="text-[10px] font-semibold text-amber-300">
-                                        {remainingBalance === 0 ? '✔ تم سداد الفاتورة بالكامل' : 'متبقي مطلوب سداده'}
+                                        {activeRemainingBalance === 0 ? '✔ تم سداد الفاتورة بالكامل' : 'متبقي مطلوب سداده'}
                                     </div>
                                 </div>
                             </div>
                             <div className="text-xl sm:text-2xl font-black text-[#facc15]" dir="ltr">
-                                {Number(remainingBalance || 0).toLocaleString()} <span className="text-xs font-bold text-amber-300">ج.م</span>
+                                {Number(activeRemainingBalance || 0).toLocaleString()} <span className="text-xs font-bold text-amber-300">ج.م</span>
                             </div>
                         </div>
                     </div>

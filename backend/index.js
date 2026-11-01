@@ -234,7 +234,15 @@ if (!fs.existsSync(frontendPath)) {
 if (!fs.existsSync(frontendPath)) {
     frontendPath = path.join(__dirname, 'dist');
 }
-app.use(express.static(frontendPath));
+app.use(express.static(frontendPath, {
+    setHeaders: (res, filePath) => {
+        if (filePath.endsWith('.html')) {
+            res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+            res.setHeader('Pragma', 'no-cache');
+            res.setHeader('Expires', '0');
+        }
+    }
+}));
 
 app.get('*', (req, res, next) => {
     // If the request is for an asset (JS, CSS) that wasn't found (cached HTML requesting old chunk)

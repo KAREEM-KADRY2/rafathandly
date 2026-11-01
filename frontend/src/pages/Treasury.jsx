@@ -4,7 +4,8 @@ import { Link } from 'react-router-dom';
 import TreasuryVoucherModal from '../components/TreasuryVoucherModal';
 import OpeningBalanceModal from '../components/OpeningBalanceModal';
 import AccountDetailsModal from '../components/AccountDetailsModal';
-import { Wallet, ArrowRightLeft, Plus, Download, Search, Trash2, FileDown, Edit, FolderOpen } from 'lucide-react';
+import TreasuryPrintVoucherModal from '../components/TreasuryPrintVoucherModal';
+import { Wallet, ArrowRightLeft, Plus, Download, Search, Trash2, FileDown, Edit, FolderOpen, Printer } from 'lucide-react';
 
 const Treasury = () => {
     const [accounts, setAccounts] = useState([]);
@@ -17,6 +18,7 @@ const Treasury = () => {
     const [showEditAccount, setShowEditAccount] = useState(false);
     const [showVoucherModal, setShowVoucherModal] = useState(false);
     const [editingVoucher, setEditingVoucher] = useState(null);
+    const [printingVoucher, setPrintingVoucher] = useState(null);
     const [voucherType, setVoucherType] = useState('receipt');
     const [showTransfer, setShowTransfer] = useState(false);
     
@@ -264,6 +266,14 @@ const Treasury = () => {
                                         {t.related_entity_type !== 'transfer_in' && t.related_entity_type !== 'transfer_out' && t.related_entity_type !== 'OPENING_BALANCE' ? (
                                             <div className="flex justify-center items-center gap-1.5">
                                                 <button
+                                                    onClick={() => setPrintingVoucher(t)}
+                                                    className="p-1.5 text-emerald-700 hover:bg-emerald-100 rounded-lg transition-colors flex items-center gap-1 font-bold text-xs bg-emerald-50 border border-emerald-200"
+                                                    title="طباعة السند رسمياً"
+                                                >
+                                                    <Printer size={14} />
+                                                    <span>طباعة</span>
+                                                </button>
+                                                <button
                                                     onClick={() => handleEditVoucher(t)}
                                                     className="p-1.5 text-blue-600 hover:bg-blue-100 rounded-lg transition-colors flex items-center gap-1 font-bold text-xs bg-blue-50 border border-blue-200"
                                                     title="تعديل السند"
@@ -427,6 +437,13 @@ const Treasury = () => {
                         fetchAccounts();
                         fetchTransactions();
                     }}
+                />
+            )}
+
+            {printingVoucher && (
+                <TreasuryPrintVoucherModal
+                    voucher={printingVoucher}
+                    onClose={() => setPrintingVoucher(null)}
                 />
             )}
         </div>

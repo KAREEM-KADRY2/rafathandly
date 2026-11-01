@@ -6,6 +6,7 @@ const SOURCE_DIR = 'C:/Users/xps/Desktop/الحاج رفعت';
 const CLEAN_DB_PATH = 'C:/Users/xps/Desktop/clean_database.sqlite';
 const ZIP_PATH_CLIENT = 'C:/Users/xps/Desktop/الحاج رفعت - نسخة العميل.zip';
 const ZIP_PATH_MAIN = 'C:/Users/xps/Desktop/الحاج رفعت.zip';
+const ZIP_PATH_ABDELRAZIK = 'C:/Users/xps/Desktop/عبد الرواق.zip';
 
 async function createPackage() {
     console.log('=== STARTING CLEAN CLIENT ZIP PACKAGING ===');
@@ -17,6 +18,7 @@ async function createPackage() {
 
     if (fs.existsSync(ZIP_PATH_CLIENT)) fs.unlinkSync(ZIP_PATH_CLIENT);
     if (fs.existsSync(ZIP_PATH_MAIN)) fs.unlinkSync(ZIP_PATH_MAIN);
+    if (fs.existsSync(ZIP_PATH_ABDELRAZIK)) fs.unlinkSync(ZIP_PATH_ABDELRAZIK);
 
     const output = fs.createWriteStream(ZIP_PATH_CLIENT);
     const archive = archiver('zip', {
@@ -32,9 +34,13 @@ async function createPackage() {
         console.log(`Duplicating archive to: ${ZIP_PATH_MAIN}`);
         fs.copyFileSync(ZIP_PATH_CLIENT, ZIP_PATH_MAIN);
 
-        console.log('\n=== BOTH CLEAN CLIENT ZIP PACKAGES GENERATED SUCCESSFULLY ===');
+        console.log(`Duplicating archive to: ${ZIP_PATH_ABDELRAZIK}`);
+        fs.copyFileSync(ZIP_PATH_CLIENT, ZIP_PATH_ABDELRAZIK);
+
+        console.log('\n=== ALL 3 CLEAN CLIENT ZIP PACKAGES GENERATED SUCCESSFULLY ===');
         console.log('1)', ZIP_PATH_CLIENT);
         console.log('2)', ZIP_PATH_MAIN);
+        console.log('3)', ZIP_PATH_ABDELRAZIK);
     });
 
     archive.on('error', function(err) {
